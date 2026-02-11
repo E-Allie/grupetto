@@ -16,6 +16,7 @@ import androidx.core.content.edit
 import com.spop.poverlay.dircon.DirConGattBridge
 import com.spop.poverlay.dircon.DirConServer
 import com.spop.poverlay.dircon.toDirConService
+import com.spop.poverlay.erg.ErgController
 import com.spop.poverlay.sensor.heartrate.HeartRateManager
 import com.spop.poverlay.sensor.interfaces.SensorInterface
 import java.util.LinkedList
@@ -97,6 +98,7 @@ class BleServer(
         private val context: Context,
         private val bluetoothManager: BluetoothManager,
         private val sensorInterface: SensorInterface,
+        private val ergController: ErgController,
         private val timeProvider: TimeProvider = SystemTimeProvider()
 ) : BluetoothGattServerCallback(), CoroutineScope {
 
@@ -210,7 +212,7 @@ class BleServer(
 
     private fun baseServices(heartRateEnabled: Boolean): List<BaseBleService> {
         val services = mutableListOf<BaseBleService>(
-            FitnessMachineService(this),
+            FitnessMachineService(this, ergController, sensorInterface),
             CyclingPowerService(this),
             CyclingSpeedAndCadenceService(this),
             DeviceInformationService(this)
