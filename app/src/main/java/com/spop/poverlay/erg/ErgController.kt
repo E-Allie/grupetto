@@ -33,6 +33,37 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
 
         private const val MIN_TARGET_POWER = 25
         private const val MAX_TARGET_POWER = 1000
+
+        // Target change large enough to be worth a feed-forward jump rather than
+        // letting the proportional term walk there. Also the point at which the
+        // integral is discarded, since it describes an operating point we left.
+        private const val FEED_FORWARD_TARGET_CHANGE_WATTS = 20
+
+        // Scales the gain scheduled from the power table's local slope. 1.0 would
+        // apply the table's whole predicted correction in a single iteration,
+        // which the measurement cannot support: smoothed power has a ~2s time
+        // constant, or 20 iterations at 10Hz, so a full correction per iteration
+        // is applied about twenty times before the reading catches up. Spreading
+        // it across one time constant gives 1/20.
+        //
+        // Measured against the swept table this lands within 10% of the hand
+        // tuned DEFAULT_KP at a typical operating point (0.0065 vs 0.0070 at
+        // 80rpm/150W), while still varying 5.9x across the map the way the brake
+        // actually does.
+        private const val ERG_SENSITIVITY = 0.05
+
+        // Bounds on the scheduled gain, so a bad patch of the fitted table cannot
+        // produce a wild or inverted response.
+        private const val MIN_SCHEDULED_KP = 0.002
+        private const val MAX_SCHEDULED_KP = 0.050
+
+        // How long to leave PID alone after a feed-forward jump. Smoothed power
+        // has a ~2s time constant, so immediately after the brake moves the
+        // reading still describes where it used to be. Acting on that stacks a
+        // correction on top of a jump that already fixed the error, which is how
+        // a 45% seek turned into 56% and a 51% power overshoot. Roughly one time
+        // constant lets the measurement catch up first.
+        private const val FEED_FORWARD_SETTLE_MS = 2000L
     }
 
     private var kp = DEFAULT_KP
@@ -52,6 +83,16 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
     private var previousSmoothedPower = 0.0
     private var isFirstIteration = true
     private var isSmoothedPowerInitialized = false
+
+    /**
+     * Set whenever the operating point moves far enough that the current
+     * resistance is a poor starting guess. Consumed by the next control loop
+     * iteration, which seeds resistance from [PowerTable] before running PID.
+     */
+    private var feedForwardPending = false
+
+    /** Wall clock after which PID may act again following a feed-forward jump. */
+    private var feedForwardSettleUntil = 0L
 
     fun enable(targetPowerWatts: Int) {
         // FitnessMachineService already refuses SetTargetPower on bikes without a
@@ -81,9 +122,11 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
         if (clamped != targetPowerWatts) {
             val previousTarget = targetPowerWatts
             targetPowerWatts = clamped
-            // Reset integral on large target changes to avoid windup overshoot
-            if (abs(clamped - previousTarget) > 20) {
+            // Reset integral on large target changes to avoid windup overshoot,
+            // and let the table place the knob rather than walking there.
+            if (abs(clamped - previousTarget) > FEED_FORWARD_TARGET_CHANGE_WATTS) {
                 integralTerm = 0.0
+                feedForwardPending = true
             }
             Timber.d("Target power set: ${clamped}W")
         }
@@ -94,6 +137,8 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
     fun getTargetPower(): Int = targetPowerWatts
 
     private fun resetPidState() {
+        feedForwardPending = true
+        feedForwardSettleUntil = 0L
         integralTerm = 0.0
         previousSmoothedPower = 0.0
         isFirstIteration = true
@@ -156,11 +201,58 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
             return
         }
 
+        // Feed-forward: jump straight to the resistance the table predicts for
+        // this target and cadence, then let PID trim from there. Without a
+        // calibrated table this does nothing and the loop behaves as it always has.
+        if (feedForwardPending) {
+            val predicted = PowerTable.resistanceFor(targetPowerWatts, cadence)
+            if (predicted == null) {
+                // No answer at this cadence. Usually that means the brake cannot
+                // reach the target here at all -- 150W at 35rpm is off the top of
+                // the map -- which is exactly what happens while a rider is still
+                // spinning up. Staying armed lets the jump land once they reach a
+                // cadence the table covers, instead of being spent on the first
+                // iteration past the cadence guard and never retried.
+                //
+                // Give it up only if PID has since arrived on its own; jumping
+                // then would disturb a loop that is already holding target.
+                if (abs(targetPowerWatts - smoothedPower) < POWER_DEADBAND_WATTS) {
+                    feedForwardPending = false
+                }
+            } else {
+                feedForwardPending = false
+                val seeded = predicted.coerceIn(MIN_RESISTANCE, MAX_RESISTANCE)
+                Timber.d(
+                    "ERG feed-forward: target=${targetPowerWatts}W cadence=${cadence.toInt()} " +
+                        "-> resistance ${seeded.toInt()}% (was ${currentResistance.toInt()}%)"
+                )
+                currentResistance = seeded
+                sensorInterface.setResistance(seeded.toInt())
+                feedForwardSettleUntil = System.currentTimeMillis() + FEED_FORWARD_SETTLE_MS
+                return
+            }
+        }
+
+        // Still waiting for the power reading to describe the post-jump brake.
+        // The EMA above keeps converging while this holds; only PID is paused,
+        // and the derivative reference is carried along so resuming does not look
+        // like a step change to the D term.
+        if (System.currentTimeMillis() < feedForwardSettleUntil) {
+            previousSmoothedPower = smoothedPower
+            Timber.v("ERG settling after feed-forward, PID held")
+            return
+        }
+
         val error = targetPowerWatts - smoothedPower
         val inDeadband = abs(error) < POWER_DEADBAND_WATTS
 
-        // P-term
-        val pTerm = kp * error
+        // P-term. Where the table can supply a local slope, the gain follows what
+        // a resistance point is actually worth in watts at this operating point;
+        // the eddy brake yields far less near the loose end than the tight end.
+        val scheduledKp = PowerTable.resistancePerWatt(targetPowerWatts, cadence)
+            ?.let { (it * ERG_SENSITIVITY).coerceIn(MIN_SCHEDULED_KP, MAX_SCHEDULED_KP) }
+        val effectiveKp = scheduledKp ?: kp
+        val pTerm = effectiveKp * error
 
         // I-term (only accumulate outside deadband)
         if (!inDeadband) {
@@ -195,7 +287,9 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
             sensorInterface.setResistance(newResistanceInt)
             Timber.d(
                 "PID: target=$targetPowerWatts, power=${smoothedPower.toInt()} (raw=${rawPower.toInt()}), " +
-                    "error=${error.toInt()}, P=${"%.2f".format(pTerm)}, I=${"%.2f".format(integralTerm)}, " +
+                    "error=${error.toInt()}, Kp=${"%.4f".format(effectiveKp)}" +
+                    (if (scheduledKp != null) "(sched)" else "(fixed)") + ", " +
+                    "P=${"%.2f".format(pTerm)}, I=${"%.2f".format(integralTerm)}, " +
                     "D=${"%.2f".format(dTerm)}, out=${"%.2f".format(output)}, resistance=$newResistanceInt%"
             )
         }
