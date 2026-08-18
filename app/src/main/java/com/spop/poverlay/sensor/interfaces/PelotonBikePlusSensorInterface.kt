@@ -70,6 +70,10 @@ class PelotonBikePlusSensorInterface(val context: Context) : SensorInterface, Co
                 readings.minOf { it }
             }
 
+    /** The Bike+ has a motorised brake reachable over the v2 binder. */
+    override val supportsResistanceControl: Boolean
+        get() = true
+
     override fun setResistance(resistance: Int) {
         currentSensor?.setResistance(resistance)
     }

@@ -16,6 +16,18 @@ class FitnessMachineService(
     private val sensorInterface: SensorInterface
 ) : BaseBleService(server) {
 
+    /**
+     * Whether this bike can actually act on a resistance or power target.
+     *
+     * Only the Bike+ has a motorised brake. On every other Peloton the FTMS
+     * target-setting features are omitted from the Feature characteristic, the
+     * supported-range characteristics are left off the service, and the
+     * corresponding Control Point procedures answer OpCodeNotSupported, so a
+     * controller app can discover the limitation instead of silently sending
+     * targets into a no-op.
+     */
+    private val resistanceControlSupported = sensorInterface.supportsResistanceControl
+
     private val indoorBikeDataCharacteristic = BluetoothGattCharacteristic(
         FitnessMachineConstants.IndoorBikeDataUUID,
         BluetoothGattCharacteristic.PROPERTY_NOTIFY,
@@ -40,9 +52,14 @@ class FitnessMachineService(
             FitnessMachineConstants.FeatureFlags.PowerMeasurementSupported or
             FitnessMachineConstants.FeatureFlags.ResistanceLevelSupported
 
-        val targetFlags =
+        // ResistanceLevelSupported above is a *measurement* feature and stays on
+        // every bike; these are the settable ones and depend on the brake.
+        val targetFlags = if (resistanceControlSupported) {
             FitnessMachineConstants.FitnessMachineTargetFlags.ResistanceTargetSettingSupported or
-            FitnessMachineConstants.FitnessMachineTargetFlags.PowerTargetSettingSupported
+                FitnessMachineConstants.FitnessMachineTargetFlags.PowerTargetSettingSupported
+        } else {
+            0
+        }
 
         val payload = byteArrayOf(
             // Feature flags (uint32 LE)
@@ -133,9 +150,15 @@ class FitnessMachineService(
     ).apply {
         addCharacteristic(indoorBikeDataCharacteristic)
         addCharacteristic(featureCharacteristic)
+        // Control Point stays on every bike: RequestControl, Reset, Start and Stop
+        // are still meaningful without a brake. Only the target procedures are gated.
         addCharacteristic(controlPointCharacteristic)
-        addCharacteristic(supportedResistanceRangeCharacteristic)
-        addCharacteristic(supportedPowerRangeCharacteristic)
+        if (resistanceControlSupported) {
+            // FTMS requires these ranges only when the matching target flag is set,
+            // and advertising them without the flag misleads controller apps.
+            addCharacteristic(supportedResistanceRangeCharacteristic)
+            addCharacteristic(supportedPowerRangeCharacteristic)
+        }
         addCharacteristic(trainingStatusCharacteristic)
         addCharacteristic(fitnessMachineStatusCharacteristic)
     }
@@ -237,7 +260,10 @@ class FitnessMachineService(
                 }
                 FitnessMachineConstants.FitnessMachineControlPointProcedure.SetTargetResistanceLevel -> {
                     // sint16 in 0.1 units (e.g. 500 = 50.0%)
-                    if (value != null && value.size >= 3) {
+                    if (!resistanceControlSupported) {
+                        Timber.d("FTMS SetTargetResistanceLevel refused: no brake control on this bike")
+                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.OpCodeNotSupported
+                    } else if (value != null && value.size >= 3) {
                         val raw = (value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)
                         val resistancePercent = (raw.toShort().toInt() / 10).coerceIn(0, 100)
                         ergController.disable()
@@ -254,7 +280,10 @@ class FitnessMachineService(
                 }
                 FitnessMachineConstants.FitnessMachineControlPointProcedure.SetTargetPower -> {
                     // sint16 watts
-                    if (value != null && value.size >= 3) {
+                    if (!resistanceControlSupported) {
+                        Timber.d("FTMS SetTargetPower refused: no brake control on this bike")
+                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.OpCodeNotSupported
+                    } else if (value != null && value.size >= 3) {
                         val watts = ((value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)).toShort().toInt()
                         Timber.d("FTMS SetTargetPower: ${watts}W")
                         if (ergController.isActive()) {

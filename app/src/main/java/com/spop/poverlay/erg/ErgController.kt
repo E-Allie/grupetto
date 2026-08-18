@@ -54,6 +54,13 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
     private var isSmoothedPowerInitialized = false
 
     fun enable(targetPowerWatts: Int) {
+        // FitnessMachineService already refuses SetTargetPower on bikes without a
+        // motorised brake; this is the same guard at the other end of the call,
+        // so ERG can never spin a control loop that cannot move anything.
+        if (!sensorInterface.supportsResistanceControl) {
+            Timber.w("ERG requested on a bike without resistance control; ignoring")
+            return
+        }
         val clamped = targetPowerWatts.coerceIn(MIN_TARGET_POWER, MAX_TARGET_POWER)
         this.targetPowerWatts = clamped
         resetPidState()
