@@ -150,13 +150,65 @@ class FitnessMachineService(
         value: ByteArray?
     ) {
         if (characteristic.uuid == FitnessMachineConstants.ControlPointUUID) {
-            // Parse opcode
-            val opcode = value?.getOrNull(0)?.toInt()?.and(0xFF) ?: -1
-            Timber.d("FTMS Control Point write: opcode=0x%02X, value=%s", opcode,
-                value?.joinToString(",") { "0x%02X".format(it) } ?: "null")
-            val result: Int
+            respondToControlPoint(value, runControlPointProcedure(value), device)
+            if (responseNeeded) {
+                server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+            }
+            return
+        }
 
-            when (opcode) {
+        // Default behavior for other characteristics
+        super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
+    }
+
+    /**
+     * DIRCON carries the same FTMS Control Point writes that GATT does, but the
+     * bridge has no BluetoothDevice to answer, so the response indication goes to
+     * every DIRCON subscriber and every connected GATT client instead.
+     */
+    override fun onDirConCharacteristicWrite(
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray
+    ): Boolean {
+        if (characteristic.uuid != FitnessMachineConstants.ControlPointUUID) {
+            return super.onDirConCharacteristicWrite(characteristic, value)
+        }
+        respondToControlPoint(value, runControlPointProcedure(value), device = null)
+        return true
+    }
+
+    private fun respondToControlPoint(
+        request: ByteArray?,
+        result: Int,
+        device: BluetoothDevice?
+    ) {
+        val opcode = request?.getOrNull(0)?.toInt()?.and(0xFF) ?: -1
+        // Build Response Code indication: [0x80, requestOpCode, resultCode]
+        controlPointCharacteristic.setValue(
+            byteArrayOf(
+                FitnessMachineConstants.FitnessMachineControlPointProcedure.ResponseCode.toByte(),
+                (opcode.coerceAtLeast(0) and 0xFF).toByte(),
+                (result and 0xFF).toByte()
+            )
+        )
+        server.notifyDirConCharacteristicChanged(controlPointCharacteristic)
+        // FTMS mandates indications for Control Point
+        if (device != null) {
+            server.notifyCharacteristicChanged(device, controlPointCharacteristic, true)
+        } else {
+            for (d in connectedDevices) {
+                server.notifyCharacteristicChanged(d, controlPointCharacteristic, true)
+            }
+        }
+    }
+
+    private fun runControlPointProcedure(value: ByteArray?): Int {
+        val opcode = value?.getOrNull(0)?.toInt()?.and(0xFF) ?: -1
+        Timber.d("FTMS Control Point write: opcode=0x%02X, value=%s", opcode,
+            value?.joinToString(",") { "0x%02X".format(it) } ?: "null")
+        val result: Int
+
+        when (opcode) {
                 FitnessMachineConstants.FitnessMachineControlPointProcedure.RequestControl -> {
                     result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
                 }
@@ -226,25 +278,7 @@ class FitnessMachineService(
                 }
             }
 
-            // Build Response Code indication: [0x80, requestOpCode, resultCode]
-            val response = byteArrayOf(
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.ResponseCode.toByte(),
-                (opcode.coerceAtLeast(0) and 0xFF).toByte(),
-                (result and 0xFF).toByte()
-            )
-            controlPointCharacteristic.setValue(response)
-            server.notifyDirConCharacteristicChanged(controlPointCharacteristic)
-            // FTMS mandates indications for Control Point
-            server.notifyCharacteristicChanged(device, controlPointCharacteristic, true)
-
-            if (responseNeeded) {
-                server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
-            }
-            return
-        }
-
-        // Default behavior for other characteristics
-        super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
+        return result
     }
 
     override fun onDisconnected(device: BluetoothDevice) {

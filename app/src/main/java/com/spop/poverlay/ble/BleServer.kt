@@ -67,6 +67,21 @@ abstract class BaseBleService(val server: BleServer) {
         }
     }
 
+    /**
+     * A write arriving over the DIRCON transport rather than over GATT. There is
+     * no BluetoothDevice behind it, so services that act on writes handle it here
+     * instead of in [onCharacteristicWriteRequest]. Storing the value is the same
+     * default the DIRCON bridge used to apply on its own.
+     */
+    @Suppress("DEPRECATION")
+    open fun onDirConCharacteristicWrite(
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+    ): Boolean {
+        characteristic.value = value
+        return true
+    }
+
     @Suppress("DEPRECATION")
     open fun onDescriptorWriteRequest(
             device: BluetoothDevice,
@@ -198,15 +213,17 @@ class BleServer(
         }
 
         override fun writeCharacteristic(uuid: UUID, value: ByteArray): Boolean {
-            val characteristic = findGattCharacteristic(uuid) ?: return false
+            val owner = findServiceOwning(uuid) ?: return false
+            val characteristic = owner.service.characteristics.first { it.uuid == uuid }
             val writable = characteristic.properties and
                 (BluetoothGattCharacteristic.PROPERTY_WRITE or
                     BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
             if (!writable) return false
 
-            @Suppress("DEPRECATION")
-            characteristic.value = value
-            return true
+            // Hand the write to the service that owns the characteristic. Without
+            // this the FTMS Control Point would only ever be written to, never
+            // acted on, so DIRCON clients could not drive resistance or ERG.
+            return owner.onDirConCharacteristicWrite(characteristic, value)
         }
     }
 
@@ -972,6 +989,12 @@ class BleServer(
             .asSequence()
             .flatMap { it.service.characteristics.asSequence() }
             .firstOrNull { it.uuid == uuid }
+    }
+
+    private fun findServiceOwning(uuid: UUID): BaseBleService? {
+        return registeredServices.firstOrNull { service ->
+            service.service.characteristics.any { it.uuid == uuid }
+        }
     }
 
     override fun onCharacteristicWriteRequest(
