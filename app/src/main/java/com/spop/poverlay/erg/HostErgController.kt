@@ -6,7 +6,20 @@ import kotlinx.coroutines.flow.first
 import timber.log.Timber
 import kotlin.math.abs
 
-class ErgController(private val sensorInterface: SensorInterface) : CoroutineScope {
+/**
+ * ERG the way it worked before the controller could be asked directly.
+ *
+ * Polls power over Binder, smooths it with a two-second EMA, seeds resistance
+ * from [PowerTable] on a large target change, and trims from there with a PID at
+ * 10 Hz. Every constant in it is shaped by the measurement lag that chain
+ * introduces -- the loop runs twenty times per time constant of its own input
+ * filter -- which is exactly the lag [NativePzafController] does not have.
+ *
+ * Kept as the fallback for bikes whose controller has no PZAF, and as the
+ * comparison for bikes that do. It has a measured baseline; native has to beat
+ * it rather than merely replace it.
+ */
+class HostErgController(private val sensorInterface: SensorInterface) : PowerController, CoroutineScope {
 
     override val coroutineContext = SupervisorJob() + Dispatchers.Default
 
@@ -94,7 +107,7 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
     /** Wall clock after which PID may act again following a feed-forward jump. */
     private var feedForwardSettleUntil = 0L
 
-    fun enable(targetPowerWatts: Int) {
+    override fun enable(watts: Int) {
         // FitnessMachineService already refuses SetTargetPower on bikes without a
         // motorised brake; this is the same guard at the other end of the call,
         // so ERG can never spin a control loop that cannot move anything.
@@ -102,22 +115,22 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
             Timber.w("ERG requested on a bike without resistance control; ignoring")
             return
         }
-        val clamped = targetPowerWatts.coerceIn(MIN_TARGET_POWER, MAX_TARGET_POWER)
-        this.targetPowerWatts = clamped
+        val clamped = watts.coerceIn(MIN_TARGET_POWER, MAX_TARGET_POWER)
+        targetPowerWatts = clamped
         resetPidState()
         active = true
         startControlLoop()
         Timber.d("ERG enabled: target=${clamped}W, PID gains: Kp=$kp, Ki=$ki, Kd=$kd")
     }
 
-    fun disable() {
+    override fun disable() {
         if (!active) return
         Timber.d("ERG disabled (was: target=${targetPowerWatts}W)")
         active = false
         stopControlLoop()
     }
 
-    fun setTargetPower(watts: Int) {
+    override fun setTarget(watts: Int) {
         val clamped = watts.coerceIn(MIN_TARGET_POWER, MAX_TARGET_POWER)
         if (clamped != targetPowerWatts) {
             val previousTarget = targetPowerWatts
@@ -132,9 +145,9 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
         }
     }
 
-    fun isActive(): Boolean = active
+    override val isActive: Boolean get() = active
 
-    fun getTargetPower(): Int = targetPowerWatts
+    override val targetWatts: Int get() = targetPowerWatts
 
     private fun resetPidState() {
         feedForwardPending = true
@@ -157,7 +170,7 @@ class ErgController(private val sensorInterface: SensorInterface) : CoroutineSco
             }
             Timber.d("PID control loop started, initial resistance: ${currentResistance.toInt()}")
 
-            while (isActive && active) {
+            while (coroutineContext.isActive && active) {
                 try {
                     executeControlLoop()
                 } catch (e: Exception) {

@@ -6,6 +6,7 @@ import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import com.spop.poverlay.erg.ErgMode
 import kotlinx.coroutines.flow.MutableStateFlow
 
 class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) : AutoCloseable {
@@ -15,7 +16,8 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
         BleTxEnabled("bleTxEnabled"),
         DirConEnabled("dirConEnabled"),
         BleFtmsDeviceName("bleFtmsDeviceName"),
-        SerialNumber("serialNumber")
+        SerialNumber("serialNumber"),
+        ErgControl("ergMode")
     }
 
     companion object {
@@ -31,12 +33,14 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
     private val mutableDirConEnabled = MutableStateFlow(true)
     private val mutableBleFtmsDeviceName = MutableStateFlow("Grupetto FTMS")
     private val mutableSerialNumber = MutableStateFlow("")
+    private val mutableErgMode = MutableStateFlow(ErgMode.Default)
 
     val showTimerWhenMinimized = mutableShowTimerWhenMinimized
     val bleTxEnabled = mutableBleTxEnabled
     val dirConEnabled = mutableDirConEnabled
     val bleFtmsDeviceName = mutableBleFtmsDeviceName
     val serialNumber = mutableSerialNumber
+    val ergMode = mutableErgMode
 
     private val sharedPreferences: SharedPreferences
 
@@ -98,6 +102,18 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
         }
     }
 
+    /**
+     * Which ERG loop to use. Auto probes the bike; the other two force a path,
+     * so the native and host loops can be compared on the same bike rather than
+     * across a rebuild.
+     */
+    fun setErgMode(mode: ErgMode) {
+        mutableErgMode.value = mode
+        sharedPreferences.edit {
+            putString(Preferences.ErgControl.key, mode.name)
+        }
+    }
+
     private fun generateSerialHex(): String {
         val value = kotlin.random.Random.nextInt(0x10000)
         return value.toString(16).padStart(4, '0').uppercase()
@@ -128,6 +144,9 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
             sn
         } else existingSerial
         mutableSerialNumber.value = ensuredSerial
+
+        mutableErgMode.value =
+            ErgMode.read(sharedPreferences, Preferences.ErgControl.key)
     }
 
     override fun close() {

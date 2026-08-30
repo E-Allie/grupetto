@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
+import com.spop.poverlay.erg.ErgMode
 import com.spop.poverlay.releases.Release
 import com.spop.poverlay.sensor.heartrate.HeartRateDevice
 import com.spop.poverlay.sensor.heartrate.HeartRateManager
@@ -67,6 +68,10 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
                         viewModel.bleTxEnabled.collectAsStateWithLifecycle(initialValue = false)
                 val dirConEnabled by
                         viewModel.dirConEnabled.collectAsStateWithLifecycle(initialValue = true)
+                val ergMode by
+                        viewModel.ergMode.collectAsStateWithLifecycle(initialValue = ErgMode.Default)
+                val ergCapability by
+                        viewModel.ergCapability.collectAsStateWithLifecycle(initialValue = null)
                 val bleFtmsDeviceName by
                         viewModel.bleFtmsDeviceName.collectAsStateWithLifecycle(
                                 initialValue = "Grupetto FTMS"
@@ -90,6 +95,9 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
                         viewModel::onBleTxEnabledClicked,
                         dirConEnabled,
                         viewModel::onDirConEnabledClicked,
+                        ergMode,
+                        viewModel::onErgModeSelected,
+                        ergCapability,
                         bleFtmsDeviceName,
                         hrConnectedDevice,
                         hrDiscoveredDevices,
@@ -122,6 +130,9 @@ private fun StartServicePage(
         onBleTxEnabledToggled: (Boolean) -> Unit,
         dirConEnabled: Boolean,
         onDirConEnabledToggled: (Boolean) -> Unit,
+        ergMode: ErgMode,
+        onErgModeSelected: (ErgMode) -> Unit,
+        ergCapability: String?,
         bleFtmsDeviceName: String,
         hrConnectedDevice: HeartRateDevice?,
         hrDiscoveredDevices: List<HeartRateDevice>,
@@ -287,6 +298,46 @@ private fun StartServicePage(
                         )
                     }
                 }
+            }
+        }
+        Spacer(modifier = Modifier.height(uiScale.dp(12f)))
+
+        Card(
+                modifier = Modifier.fillMaxWidth(),
+                backgroundColor = cardColor,
+                elevation = uiScale.dp(4f)
+        ) {
+            Column(modifier = Modifier.padding(cardPadding)) {
+                Text("ERG Control", fontSize = uiScale.sp(18f), fontWeight = FontWeight.Bold, color = headingColor)
+                Spacer(modifier = Modifier.height(uiScale.dp(8f)))
+                Text(
+                        text = "Which loop holds a power target when an app sends one. " +
+                                "Auto hands it to the Bike+ controller where the firmware can take it, " +
+                                "and runs the app's own PID loop everywhere else.",
+                        fontSize = uiScale.sp(13f),
+                        color = bodyColor
+                )
+                Spacer(modifier = Modifier.height(uiScale.dp(8f)))
+                Row(horizontalArrangement = Arrangement.spacedBy(uiScale.dp(8f))) {
+                    ErgMode.values().forEach { mode ->
+                        val selected = mode == ergMode
+                        Button(
+                                onClick = { onErgModeSelected(mode) },
+                                colors = ButtonDefaults.buttonColors(
+                                        backgroundColor = if (selected) accentColor else Color(0xFF2A2A2A),
+                                        contentColor = Color.White
+                                )
+                        ) {
+                            Text(ergModeLabel(mode), fontSize = uiScale.sp(14f))
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(uiScale.dp(8f)))
+                Text(
+                        text = ergCapability ?: "Asking the controller what it can do...",
+                        fontSize = uiScale.sp(13f),
+                        color = bodyColor
+                )
             }
         }
         Spacer(modifier = Modifier.height(uiScale.dp(12f)))
@@ -778,4 +829,14 @@ private fun HeartRateDeviceRow(
                         Text(actionLabel, color = actionColor)
                 }
         }
+}
+
+/**
+ * Short enough to sit three across. The setting is a development and comparison
+ * control, so the labels name the mechanism rather than a benefit.
+ */
+private fun ergModeLabel(mode: ErgMode) = when (mode) {
+    ErgMode.Auto -> "Auto"
+    ErgMode.Native -> "Bike PZAF"
+    ErgMode.Host -> "App PID"
 }

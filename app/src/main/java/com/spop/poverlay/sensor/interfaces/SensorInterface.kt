@@ -1,5 +1,6 @@
 package com.spop.poverlay.sensor.interfaces
 
+import com.spop.poverlay.sensor.v2.TitanControl
 import com.spop.poverlay.util.calculateSpeedFromPelotonV1Power
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -21,6 +22,14 @@ interface SensorInterface {
      */
     val supportsResistanceControl: Boolean
         get() = false
+
+    /**
+     * The Titan controller's own watt-setpoint loop and status record, on the
+     * hardware that has one. Null everywhere else, which is the first gate on
+     * native ERG -- see [com.spop.poverlay.erg.PzafProbe] for the rest.
+     */
+    val titanControl: TitanControl?
+        get() = null
 
     fun setResistance(resistance: Int) {} // No-op default; Bike+ overrides
 }

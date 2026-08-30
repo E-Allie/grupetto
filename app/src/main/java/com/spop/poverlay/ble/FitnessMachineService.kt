@@ -5,15 +5,16 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
-import com.spop.poverlay.erg.ErgController
+import com.spop.poverlay.erg.ErgCoordinator
 import com.spop.poverlay.sensor.interfaces.SensorInterface
+import com.spop.poverlay.sensor.v2.PzafStatus
 import com.spop.poverlay.sim.SimulationParameters
 import timber.log.Timber
 
 @Suppress("DEPRECATION")
 class FitnessMachineService(
     server: BleServer,
-    private val ergController: ErgController,
+    private val ergController: ErgCoordinator,
     private val sensorInterface: SensorInterface
 ) : BaseBleService(server) {
 
@@ -145,6 +146,11 @@ class FitnessMachineService(
         BluetoothGattCharacteristic.PROPERTY_READ,
         BluetoothGattCharacteristic.PERMISSION_READ
     ).apply {
+        // TODO: PZAF clamps the target to 15..800W in pzaf_mode_set_power_sp, so
+        // this over-promises at the top and under-promises at the bottom on any
+        // bike running the native loop. Left alone for now: the range is read
+        // once at connect and controller apps cache it, so it cannot honestly
+        // follow a mid-session path switch. Revisit alongside sim mode.
         // Little-endian: min(25W), max(1000W), step(1W) -> sint16 values
         setValue(byteArrayOf(
             0x19, 0x00,       // min = 25
@@ -275,6 +281,14 @@ class FitnessMachineService(
                     } else if (value != null && value.size >= 3) {
                         val raw = (value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)
                         val resistancePercent = (raw.toShort().toInt() / 10).coerceIn(0, 100)
+                        // PZAF has to go before the brake will listen. While it
+                        // is enabled the controller drops ordinary set-resistance
+                        // commands -- StartListnerTask checks is_pzaf_enabled()
+                        // and logs rather than storing the new target. Order is
+                        // enough to make this safe: both commands go through the
+                        // same AffernetService handler and the same controller
+                        // command listener, and pzaf_disable_control clears the
+                        // mode before that listener reads the next command.
                         ergController.disable()
                         sensorInterface.setResistance(resistancePercent)
                         Timber.d("FTMS SetTargetResistanceLevel: raw=$raw -> $resistancePercent%")
@@ -295,8 +309,8 @@ class FitnessMachineService(
                     } else if (value != null && value.size >= 3) {
                         val watts = ((value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)).toShort().toInt()
                         Timber.d("FTMS SetTargetPower: ${watts}W")
-                        if (ergController.isActive()) {
-                            ergController.setTargetPower(watts)
+                        if (ergController.isActive) {
+                            ergController.setTarget(watts)
                         } else {
                             ergController.enable(watts)
                         }
@@ -402,7 +416,13 @@ class FitnessMachineService(
         }
 
         val newStatus = when {
-            ergController.isActive() && cadence > 0 -> FitnessMachineConstants.TrainingStatus.WattControl.toByte()
+            // Armed but stationary is still watt control. PZAF holds status 20 or
+            // 21 while the rider is stopped and takes the brake the moment they
+            // turn the cranks, so reporting Idle there tells a controller app the
+            // target was dropped when it was not. Observed on a stationary bike:
+            // the enable landed, the controller reported "enabled, low rpm", and
+            // the old rule immediately published Idle over the top of it.
+            ergController.isActive -> FitnessMachineConstants.TrainingStatus.WattControl.toByte()
             cadence > 0 -> FitnessMachineConstants.TrainingStatus.ManualMode.toByte()
             else -> FitnessMachineConstants.TrainingStatus.Idle.toByte()
         }
@@ -414,6 +434,28 @@ class FitnessMachineService(
             for (device in connectedDevices) {
                 server.notifyCharacteristicChanged(device, trainingStatusCharacteristic, false)
             }
+        }
+    }
+
+    init {
+        // The controller can drop PZAF on its own -- knob, homing, calibration,
+        // low power, error, or sixty seconds without pedalling. Nothing re-arms
+        // it: the knob is the rider's only control once software has stopped,
+        // and grabbing the brake back would fight that. What this does is tell
+        // the controller app the truth, so it stops drawing a target that is no
+        // longer being held. The rider's target is kept by ErgCoordinator and
+        // comes back from the overlay's ERG control.
+        ergController.onStandDown = { status ->
+            val cause = if (status == PzafStatus.DISABLED_BY_KNOB ||
+                status == PzafStatus.DISABLED_BY_NO_USAGE_TIMEOUT
+            ) {
+                FitnessMachineConstants.FitnessMachineStatus.StoppedOrPausedByUser
+            } else {
+                FitnessMachineConstants.FitnessMachineStatus.StoppedBySafetyKey
+            }
+            Timber.w("FTMS reporting PZAF stand down: %s", PzafStatus.name(status))
+            setTrainingStatus(FitnessMachineConstants.TrainingStatus.Idle)
+            notifyFitnessMachineStatus(byteArrayOf(cause.toByte()))
         }
     }
 }

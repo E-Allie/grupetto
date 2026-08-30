@@ -13,6 +13,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
+import com.spop.poverlay.erg.ErgMode
 import com.spop.poverlay.overlay.OverlayService
 import com.spop.poverlay.releases.Release
 import com.spop.poverlay.releases.ReleaseChecker
@@ -20,6 +21,7 @@ import com.spop.poverlay.sensor.heartrate.HeartRateDevice
 import com.spop.poverlay.sensor.heartrate.HeartRateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -58,7 +60,15 @@ class ConfigurationViewModel(
     val bleFtmsDeviceName
         get() = configurationRepository.bleFtmsDeviceName
 
+    val ergMode
+        get() = configurationRepository.ergMode
+
     private val bleServer = (application as GrupettoApplication).bleServer
+    private val ergController = (application as GrupettoApplication).ergController
+
+    /** What the PZAF probe concluded, so the ERG card can say why it chose. */
+    val ergCapability = ergController.state.map { it.capability }
+
     private var batteryOptimizationPromptShownThisSession = false
 
     init {
@@ -77,6 +87,10 @@ class ConfigurationViewModel(
 
     fun onShowTimerWhenMinimizedClicked(isChecked: Boolean) {
         configurationRepository.setShowTimerWhenMinimized(isChecked)
+    }
+
+    fun onErgModeSelected(mode: ErgMode) {
+        configurationRepository.setErgMode(mode)
     }
 
     fun onBleTxEnabledClicked(isChecked: Boolean) {

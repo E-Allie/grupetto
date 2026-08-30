@@ -197,6 +197,8 @@ fun OverlayMainContent(
         
         GearShifter(modifier = Modifier.requiredWidth(GearShifterWidth))
 
+        ErgButton(modifier = Modifier.requiredWidth(ErgButtonWidth))
+
         StatCard(
                 "Calories",
                 calories,
