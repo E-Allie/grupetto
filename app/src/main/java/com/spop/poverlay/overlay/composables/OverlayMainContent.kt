@@ -195,6 +195,8 @@ fun OverlayMainContent(
                 )
         }
         
+        GearShifter(modifier = Modifier.requiredWidth(GearShifterWidth))
+
         StatCard(
                 "Calories",
                 calories,
