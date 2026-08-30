@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import com.spop.poverlay.erg.ErgController
 import com.spop.poverlay.sensor.interfaces.SensorInterface
+import com.spop.poverlay.sim.SimulationParameters
 import timber.log.Timber
 
 @Suppress("DEPRECATION")
@@ -54,9 +55,17 @@ class FitnessMachineService(
 
         // ResistanceLevelSupported above is a *measurement* feature and stays on
         // every bike; these are the settable ones and depend on the brake.
+        //
+        // IndoorBikeSimulationParametersSupported is advertised even though sim
+        // mode does not drive the brake yet. Controller apps gate their gradient
+        // writes on this bit, so leaving it clear means never seeing what they
+        // would have sent, and finding that out is the whole point of the
+        // handler below. The bike answers Success and records the parameters;
+        // resistance stays where the rider left it.
         val targetFlags = if (resistanceControlSupported) {
             FitnessMachineConstants.FitnessMachineTargetFlags.ResistanceTargetSettingSupported or
-                FitnessMachineConstants.FitnessMachineTargetFlags.PowerTargetSettingSupported
+                FitnessMachineConstants.FitnessMachineTargetFlags.PowerTargetSettingSupported or
+                FitnessMachineConstants.FitnessMachineTargetFlags.IndoorBikeSimulationParametersSupported
         } else {
             0
         }
@@ -173,7 +182,7 @@ class FitnessMachineService(
         value: ByteArray?
     ) {
         if (characteristic.uuid == FitnessMachineConstants.ControlPointUUID) {
-            respondToControlPoint(value, runControlPointProcedure(value), device)
+            respondToControlPoint(value, runControlPointProcedure(value, "gatt"), device)
             if (responseNeeded) {
                 server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
             }
@@ -196,7 +205,7 @@ class FitnessMachineService(
         if (characteristic.uuid != FitnessMachineConstants.ControlPointUUID) {
             return super.onDirConCharacteristicWrite(characteristic, value)
         }
-        respondToControlPoint(value, runControlPointProcedure(value), device = null)
+        respondToControlPoint(value, runControlPointProcedure(value, "dircon"), device = null)
         return true
     }
 
@@ -225,7 +234,7 @@ class FitnessMachineService(
         }
     }
 
-    private fun runControlPointProcedure(value: ByteArray?): Int {
+    private fun runControlPointProcedure(value: ByteArray?, transport: String): Int {
         val opcode = value?.getOrNull(0)?.toInt()?.and(0xFF) ?: -1
         Timber.d("FTMS Control Point write: opcode=0x%02X, value=%s", opcode,
             value?.joinToString(",") { "0x%02X".format(it) } ?: "null")
@@ -299,6 +308,34 @@ class FitnessMachineService(
                         result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
                     } else {
                         result = FitnessMachineConstants.FitnessMachineControlPointResultCode.InvalidParameter
+                    }
+                }
+                FitnessMachineConstants.FitnessMachineControlPointProcedure.SetIndoorBikeSimulationParameters -> {
+                    // Sim mode: the app describes the road and the trainer works
+                    // out the resistance. Nothing works it out yet -- this parses,
+                    // logs and records the parameters so a real ride can show what
+                    // a controller app actually sends, which is what the gear and
+                    // physics model have to be built against. Resistance is left
+                    // exactly where it is.
+                    val parameters = SimulationParameters.parse(value)
+                    if (!resistanceControlSupported) {
+                        Timber.d("FTMS SetIndoorBikeSimulationParameters refused: no brake control on this bike")
+                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.OpCodeNotSupported
+                    } else if (parameters == null) {
+                        Timber.w("FTMS SetIndoorBikeSimulationParameters: short payload %s",
+                            value?.joinToString(" ") { "%02x".format(it) } ?: "null")
+                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.InvalidParameter
+                    } else {
+                        Timber.i("FTMS SetIndoorBikeSimulationParameters [%s]: %s (observed only, brake unchanged)",
+                            transport, parameters)
+                        // Echoing the parameters back as a status makes them
+                        // visible to every subscriber, so a laptop watching over
+                        // DIRCON sees the grades alongside the ride.
+                        notifyFitnessMachineStatus(byteArrayOf(
+                            FitnessMachineConstants.FitnessMachineStatus.IndoorBikeSimulationParametersChanged.toByte(),
+                            value!![1], value[2], value[3], value[4], value[5], value[6]
+                        ))
+                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
                     }
                 }
                 else -> {
