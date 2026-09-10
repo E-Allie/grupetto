@@ -1,12 +1,13 @@
 package com.spop.poverlay.overlay.composables
 
-// import androidx.compose.material.Text
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.spop.poverlay.R
 import com.spop.poverlay.overlay.MetricType
@@ -78,68 +79,92 @@ fun OverlayMainContent(
                 MetricType.HEART_RATE -> 220f
             }
 
-    Row(
-            modifier = modifier,
+    val statCardModifier = Modifier.requiredWidth(StatCardWidth)
+    val chartWidth = if (shrinkChart) PowerChartShrunkWidth else PowerChartFullWidth
+    val chartPadding = if (shrinkChart) 15.dp else 8.dp
+
+    // Equal-width sides keep the graph at the overlay's midpoint, including
+    // when the heart-rate card appears or the rider changes the graph width.
+    // Keep the four cycling metrics together and the gear/ERG controls adjacent.
+    val sideWidth = maxOf(
+        StatCardWidth * 4,
+        GearShifterWidth + ErgButtonWidth + StatCardWidth * (if (showHeartRateCard) 2 else 1)
+    )
+
+    Row(modifier = modifier, verticalAlignment = rowAlignment) {
+        Row(
+            modifier = Modifier.requiredWidth(sideWidth),
             verticalAlignment = rowAlignment,
-            horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        val statCardModifier = Modifier.requiredWidth(StatCardWidth)
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            StatCard(
+                    name = "Power",
+                    value = power,
+                    unit = "watts",
+                    modifier = statCardModifier,
+                    iconDrawable = R.drawable.ic_power,
+                    maxValue = maxPower,
+                    totalValue = totalEnergy,
+                    totalUnit = "kJ",
+                    color = MetricPowerColor,
+                    onClick = { onMetricSelected(MetricType.POWER) }
+            )
 
-        StatCard(
-                name = "Power",
-                value = power,
-                unit = "watts",
-                modifier = statCardModifier,
-                iconDrawable = R.drawable.ic_power,
-                maxValue = maxPower,
-                totalValue = totalEnergy,
-                totalUnit = "kJ",
-                color = MetricPowerColor,
-                onClick = { onMetricSelected(MetricType.POWER) }
-        )
+            StatCard(
+                    name = "Cadence",
+                    value = rpm,
+                    unit = "rpm",
+                    modifier = statCardModifier,
+                    iconDrawable = R.drawable.ic_cadence,
+                    maxValue = maxCadence,
+                    totalValue = avgCadence,
+                    totalUnit = "avg",
+                    color = MetricCadenceColor,
+                    onClick = { onMetricSelected(MetricType.CADENCE) }
+            )
 
-        StatCard(
-                name = "Cadence",
-                value = rpm,
-                unit = "rpm",
-                modifier = statCardModifier,
-                iconDrawable = R.drawable.ic_cadence,
-                maxValue = maxCadence,
-                totalValue = avgCadence,
-                totalUnit = "avg",
-                color = MetricCadenceColor,
-                onClick = { onMetricSelected(MetricType.CADENCE) }
-        )
+            StatCard(
+                    name = "Resistance",
+                    value = resistance,
+                    unit = "%",
+                    modifier = statCardModifier,
+                    iconDrawable = R.drawable.ic_resistance,
+                    maxValue = maxResistance,
+                    totalValue = avgResistance,
+                    totalUnit = "avg",
+                    color = MetricResistanceColor,
+                    onClick = { onMetricSelected(MetricType.RESISTANCE) }
+            )
 
-        val chartWidth =
-                if (shrinkChart) {
-                    PowerChartShrunkWidth
-                } else {
-                    PowerChartFullWidth
-                }
-        val chartPadding =
-                if (shrinkChart) {
-                    15.dp
-                } else {
-                    8.dp
-                }
+            StatCard(
+                    name = "Speed",
+                    value = speed,
+                    unit = speedLabel,
+                    modifier = statCardModifier,
+                    iconDrawable = R.drawable.ic_speed,
+                    maxValue = maxSpeed,
+                    totalValue = totalDistance,
+                    totalUnit = distanceUnit,
+                    color = MetricSpeedColor,
+                    onClick = { onMetricSelected(MetricType.SPEED) },
+                    onUnitClick = onSpeedUnitClicked
+            )
+        }
 
         Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier =
-                        Modifier.pointerInput(Unit) {
-                            detectTapGestures(
-                                    onTap = { onChartClicked() },
-                                    onLongPress = { shrinkChart = !shrinkChart }
-                            )
-                        }
+                        Modifier.requiredWidth(chartWidth)
+                                .semantics {
+                                    contentDescription = "${selectedMetric.name.lowercase().replace('_', ' ')} history graph"
+                                }
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                            onTap = { onChartClicked() },
+                                            onLongPress = { shrinkChart = !shrinkChart }
+                                    )
+                                }
         ) {
-            /* Text(
-                text = chartLabel,
-                color = chartColor,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold
-            )*/
             LineChart(
                     data = currentGraph,
                     maxValue = chartMaxValue,
@@ -153,34 +178,12 @@ fun OverlayMainContent(
             )
         }
 
-        StatCard(
-                name = "Resistance",
-                value = resistance,
-                unit = "%",
-                modifier = statCardModifier,
-                iconDrawable = R.drawable.ic_resistance,
-                maxValue = maxResistance,
-                totalValue = avgResistance,
-                totalUnit = "avg",
-                color = MetricResistanceColor,
-                onClick = { onMetricSelected(MetricType.RESISTANCE) }
-        )
-
-        StatCard(
-                name = "Speed",
-                value = speed,
-                unit = speedLabel,
-                modifier = statCardModifier,
-                iconDrawable = R.drawable.ic_speed,
-                maxValue = maxSpeed,
-                totalValue = totalDistance,
-                totalUnit = distanceUnit,
-                color = MetricSpeedColor,
-                onClick = { onMetricSelected(MetricType.SPEED) },
-                onUnitClick = onSpeedUnitClicked
-        )
-
-        if (showHeartRateCard) {
+        Row(
+            modifier = Modifier.requiredWidth(sideWidth),
+            verticalAlignment = rowAlignment,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            if (showHeartRateCard) {
                 StatCard(
                         name = "Heart Rate",
                         value = heartRate,
@@ -193,20 +196,22 @@ fun OverlayMainContent(
                         color = MetricHeartRateColor,
                         onClick = { onMetricSelected(MetricType.HEART_RATE) }
                 )
+            }
+
+            Row(verticalAlignment = rowAlignment) {
+                GearShifter(modifier = Modifier.requiredWidth(GearShifterWidth))
+                ErgButton(modifier = Modifier.requiredWidth(ErgButtonWidth))
+            }
+
+            StatCard(
+                    "Calories",
+                    calories,
+                    color = MetricCalorieColor,
+                    unit = "kcal",
+                    maxValue = "",
+                    modifier = statCardModifier,
+                    iconDrawable = R.drawable.ic_calories
+            )
         }
-        
-        GearShifter(modifier = Modifier.requiredWidth(GearShifterWidth))
-
-        ErgButton(modifier = Modifier.requiredWidth(ErgButtonWidth))
-
-        StatCard(
-                "Calories",
-                calories,
-                color = MetricCalorieColor,
-                unit = "kcal",
-                maxValue = "",
-                modifier = statCardModifier,
-                iconDrawable = R.drawable.ic_calories
-        )
     }
 }
