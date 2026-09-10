@@ -21,6 +21,7 @@ import com.spop.poverlay.sensor.heartrate.HeartRateManager
 import com.spop.poverlay.sensor.interfaces.SensorInterface
 import java.util.LinkedList
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArraySet
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
@@ -41,7 +42,7 @@ class SystemTimeProvider : TimeProvider {
 abstract class BaseBleService(val server: BleServer) {
     abstract val service: BluetoothGattService
     abstract fun onSensorDataUpdated(cadence: Float, power: Float, speed: Float, resistance: Float)
-    protected val connectedDevices = mutableSetOf<BluetoothDevice>()
+    protected val connectedDevices = CopyOnWriteArraySet<BluetoothDevice>()
 
     fun hasConnectedDevices(): Boolean = connectedDevices.isNotEmpty()
 
@@ -329,16 +330,18 @@ class BleServer(
             Timber.d("BLE server already started, ignoring duplicate start()")
             return
         }
-        if (isDirConOnlyStarted) {
-            stopDirConOnly()
-        }
         val bluetoothAdapter = bluetoothManager.adapter
         if (bluetoothAdapter == null) {
             Timber.e("Bluetooth adapter is null")
             return
         }
 
-        val localAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
+        val localAdvertiser = try {
+            bluetoothAdapter.bluetoothLeAdvertiser
+        } catch (error: SecurityException) {
+            Timber.w(error, "BLE permission unavailable; keeping DIRCON running")
+            return
+        }
         if (localAdvertiser == null) {
             Timber.e("Failed to create advertiser")
             return
@@ -373,6 +376,10 @@ class BleServer(
                 return
             }
             gattServer = server
+            // Keep the independent TCP transport until BLE has actually opened.
+            // In particular, a disabled Bluetooth radio has no advertiser and
+            // must not tear down DIRCON (including local Scatto on 127.0.0.1).
+            if (isDirConOnlyStarted) stopDirConOnly()
             isServerStarted = true
             
             // Register Bluetooth state change receiver
@@ -390,10 +397,16 @@ class BleServer(
             
         } catch (e: SecurityException) {
             Timber.e(e, "Failed to open GATT server due to missing Bluetooth permission")
-            stop() // Clean up partial initialization
+            if (gattServer != null) {
+                stop()
+                startDirConOnly()
+            }
         } catch (e: Exception) {
             Timber.e(e, "Failed to start BLE server")
-            stop() // Clean up partial initialization
+            if (gattServer != null) {
+                stop()
+                startDirConOnly()
+            }
         }
     }
 
@@ -586,7 +599,13 @@ class BleServer(
         stopSensorDataUpdates()
         stopDirCon()
         stopAdvertising()
-        gattServer?.clearServices()
+        try {
+            gattServer?.clearServices()
+        } catch (error: SecurityException) {
+            Timber.e(error, "Bluetooth permission lost during service refresh")
+            stop()
+            return
+        }
         registeredServices.clear()
         servicesToRegister.clear()
         currentlyRegisteringService = null

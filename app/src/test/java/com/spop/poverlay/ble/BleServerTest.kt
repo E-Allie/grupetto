@@ -13,12 +13,54 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkStatic
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 
 class BleServerTest {
+    private fun markDirConRunning() {
+        BleServer::class.java.getDeclaredField("isDirConOnlyStarted").apply { isAccessible = true }
+            .setBoolean(bleServer, true)
+    }
+
+    private fun assertDirConRunning() {
+        assertTrue(BleServer::class.java.getDeclaredField("isDirConOnlyStarted")
+            .apply { isAccessible = true }.getBoolean(bleServer))
+    }
+
+    @Test fun `Bluetooth off or absent does not stop the independent DIRCON transport`() {
+        markDirConRunning()
+        every { bluetoothManager.adapter } returns null
+        bleServer.start()
+        assertDirConRunning()
+        val adapter = mockk<BluetoothAdapter>(relaxed = true)
+        every { bluetoothManager.adapter } returns adapter
+        every { adapter.bluetoothLeAdvertiser } returns null
+        bleServer.start()
+        assertDirConRunning()
+        every { adapter.bluetoothLeAdvertiser } throws SecurityException("permission revoked")
+        bleServer.start()
+        assertDirConRunning()
+    }
+
+    @Test fun `failed GATT open leaves existing DIRCON available`() {
+        mockkStatic(ContextCompat::class)
+        try {
+            every { ContextCompat.checkSelfPermission(context, any()) } returns PackageManager.PERMISSION_GRANTED
+            val adapter = mockk<BluetoothAdapter>(relaxed = true)
+            every { bluetoothManager.adapter } returns adapter
+            every { adapter.bluetoothLeAdvertiser } returns mockk(relaxed = true)
+            markDirConRunning()
+            every { bluetoothManager.openGattServer(context, any()) } returns null
+            bleServer.start()
+            assertDirConRunning()
+            every { bluetoothManager.openGattServer(context, any()) } throws SecurityException("unavailable")
+            bleServer.start()
+            assertDirConRunning()
+        } finally { unmockkStatic(ContextCompat::class) }
+    }
 
     private lateinit var context: Context
     private lateinit var bluetoothManager: BluetoothManager
