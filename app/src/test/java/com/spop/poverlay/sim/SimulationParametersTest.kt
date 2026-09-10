@@ -50,4 +50,10 @@ class SimulationParametersTest {
         // Six bytes is one short of a complete write.
         assertNull(SimulationParameters.parse(bytes(0x11, 0x00, 0x00, 0xC2, 0x01, 0x28)))
     }
+
+    @Test
+    fun `rejects trailing bytes and the wrong opcode`() {
+        assertNull(SimulationParameters.parse(bytes(17, 0, 0, 0, 0, 0, 0, 0)))
+        assertNull(SimulationParameters.parse(bytes(5, 0, 0, 0, 0, 0, 0)))
+    }
 }

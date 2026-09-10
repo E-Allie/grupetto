@@ -7,17 +7,15 @@ package com.spop.poverlay.sim
  *
  * Together with a road speed they define the power the rider owes:
  *
- *     P = v * ( m*g*sin(theta) + m*g*Crr*cos(theta) + Cw*(v + wind)^2 )
+ * See [RoadLoadModel] for the equation and the wind-coefficient convention.
  *
- * Everything on the right except mass and speed arrives in this message. Mass
- * has no field anywhere in FTMS and has to be configured. Speed is the hard one
+ * Mass and speed are not carried in this message. Mass is configured locally.
+ * Speed is the hard one
  * on a Peloton: there is no wheel, no freewheel and exactly one gear ratio, so
  * it has to be synthesised from cadence and a chosen ratio. See [VirtualGears].
  *
- * Nothing acts on these yet. They are parsed, logged and recorded so a real
- * ride can answer what a controller app actually sends -- in particular whether
- * a game's own virtual shifting shows up as a changed [gradePercent] or a
- * scaled [crr], which decides how much of the gear model has to live here.
+ * App-side gear changes may affect these parameters. They are honored as sent;
+ * a changed coefficient is not decoded as a second gear command.
  */
 data class SimulationParameters(
     /** Head wind in m/s. Positive is a head wind, negative a tail wind. */
@@ -26,9 +24,15 @@ data class SimulationParameters(
     val gradePercent: Double,
     /** Coefficient of rolling resistance, dimensionless. Road tyres are ~0.004. */
     val crr: Double,
-    /** Wind resistance coefficient in kg/m, equal to 0.5 * rho * CdA. */
+    /** Trainer convention: rho * CdA in kg/m; the force equation includes 0.5. */
     val cw: Double
 ) {
+    /** Finite values within the FTMS wire ranges, including legitimate zeros. */
+    val isValid: Boolean get() =
+        windSpeedMps.isFinite() && windSpeedMps in -32.768..32.767 &&
+            gradePercent.isFinite() && gradePercent in -327.68..327.67 &&
+            crr.isFinite() && crr in 0.0..0.0255 && cw.isFinite() && cw in 0.0..2.55
+
     override fun toString(): String = "grade=%+.2f%% wind=%+.3fm/s crr=%.4f cw=%.2fkg/m"
         .format(gradePercent, windSpeedMps, crr, cw)
 
@@ -37,11 +41,10 @@ data class SimulationParameters(
         const val PAYLOAD_LENGTH = 7
 
         /**
-         * Decode a Control Point write, or null when it is too short to be one.
-         * The caller has already established that byte 0 is the 0x11 opcode.
+         * Decode exactly one 0x11 Control Point write. Reject truncated/extra bytes.
          */
         fun parse(value: ByteArray?): SimulationParameters? {
-            if (value == null || value.size < PAYLOAD_LENGTH) return null
+            if (value == null || value.size != PAYLOAD_LENGTH || value[0] != 0x11.toByte()) return null
 
             fun sint16(offset: Int): Int {
                 val raw = (value[offset].toInt() and 0xFF) or
@@ -50,10 +53,10 @@ data class SimulationParameters(
             }
 
             return SimulationParameters(
-                windSpeedMps = sint16(1) * 0.001,
-                gradePercent = sint16(3) * 0.01,
-                crr = (value[5].toInt() and 0xFF) * 0.0001,
-                cw = (value[6].toInt() and 0xFF) * 0.01
+                windSpeedMps = sint16(1) / 1000.0,
+                gradePercent = sint16(3) / 100.0,
+                crr = (value[5].toInt() and 0xFF) / 10000.0,
+                cw = (value[6].toInt() and 0xFF) / 100.0
             )
         }
     }

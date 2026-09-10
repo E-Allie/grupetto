@@ -1,11 +1,14 @@
 package com.spop.poverlay.sim
 
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VirtualGearsTest {
+
+    @Before fun useClimbingProfile() { VirtualGears.setProfile(GearProfile.Climbing) }
 
     @After
     fun reset() {
@@ -19,7 +22,7 @@ class VirtualGearsTest {
         ratios.zipWithNext().forEach { (low, high) ->
             assertTrue("ratios must increase: $low then $high", high > low)
         }
-        assertEquals(1.21, ratios.first(), 1e-6)
+        assertEquals(0.40, ratios.first(), 1e-6)
         assertEquals(4.55, ratios.last(), 1e-6)
     }
 
@@ -55,7 +58,7 @@ class VirtualGearsTest {
         val lowKmh = VirtualGears.virtualSpeedMps(85.0, gear = 1) * 3.6
         val highKmh = VirtualGears.virtualSpeedMps(85.0, gear = VirtualGears.GEAR_COUNT) * 3.6
 
-        assertTrue("lowest gear was $lowKmh km/h", lowKmh in 10.0..16.0)
+        assertTrue("lowest gear was $lowKmh km/h", lowKmh in 3.0..6.0)
         assertTrue("highest gear was $highKmh km/h", highKmh in 44.0..54.0)
     }
 
