@@ -6,16 +6,19 @@ import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import com.spop.poverlay.erg.ErgCoordinator
+import com.spop.poverlay.erg.ErgPath
 import com.spop.poverlay.sensor.interfaces.SensorInterface
 import com.spop.poverlay.sensor.v2.PzafStatus
-import com.spop.poverlay.sim.SimulationParameters
+import com.spop.poverlay.sim.TrainerController
+import com.spop.poverlay.sim.TrainerMode
 import timber.log.Timber
 
 @Suppress("DEPRECATION")
 class FitnessMachineService(
     server: BleServer,
     private val ergController: ErgCoordinator,
-    private val sensorInterface: SensorInterface
+    private val sensorInterface: SensorInterface,
+    private val trainerController: TrainerController
 ) : BaseBleService(server) {
 
     /**
@@ -57,16 +60,13 @@ class FitnessMachineService(
         // ResistanceLevelSupported above is a *measurement* feature and stays on
         // every bike; these are the settable ones and depend on the brake.
         //
-        // IndoorBikeSimulationParametersSupported is advertised even though sim
-        // mode does not drive the brake yet. Controller apps gate their gradient
-        // writes on this bit, so leaving it clear means never seeing what they
-        // would have sent, and finding that out is the whole point of the
-        // handler below. The bike answers Success and records the parameters;
-        // resistance stays where the rider left it.
+        // Terrain control is an explicit setting. Re-registering after a change
+        // lets clients discover the matching feature bit before sending commands.
         val targetFlags = if (resistanceControlSupported) {
             FitnessMachineConstants.FitnessMachineTargetFlags.ResistanceTargetSettingSupported or
                 FitnessMachineConstants.FitnessMachineTargetFlags.PowerTargetSettingSupported or
-                FitnessMachineConstants.FitnessMachineTargetFlags.IndoorBikeSimulationParametersSupported
+                (if (trainerController.supportsSimulation)
+                    FitnessMachineConstants.FitnessMachineTargetFlags.IndoorBikeSimulationParametersSupported else 0)
         } else {
             0
         }
@@ -146,15 +146,12 @@ class FitnessMachineService(
         BluetoothGattCharacteristic.PROPERTY_READ,
         BluetoothGattCharacteristic.PERMISSION_READ
     ).apply {
-        // TODO: PZAF clamps the target to 15..800W in pzaf_mode_set_power_sp, so
-        // this over-promises at the top and under-promises at the bottom on any
-        // bike running the native loop. Left alone for now: the range is read
-        // once at connect and controller apps cache it, so it cannot honestly
-        // follow a mid-session path switch. Revisit alongside sim mode.
-        // Little-endian: min(25W), max(1000W), step(1W) -> sint16 values
+        // A stable range supported by either selectable ERG backend. Internal
+        // SIM demand uses each backend's own limits, independently of this field.
+        // Little-endian: min(25W), max(800W), step(1W).
         setValue(byteArrayOf(
             0x19, 0x00,       // min = 25
-            0xE8.toByte(), 0x03, // max = 1000
+            0x20, 0x03, // max = 800: supported by either selectable backend
             0x01, 0x00        // step = 1
         ))
     }
@@ -178,6 +175,7 @@ class FitnessMachineService(
         addCharacteristic(fitnessMachineStatusCharacteristic)
     }
 
+    @Synchronized
     override fun onCharacteristicWriteRequest(
         device: BluetoothDevice,
         requestId: Int,
@@ -188,7 +186,11 @@ class FitnessMachineService(
         value: ByteArray?
     ) {
         if (characteristic.uuid == FitnessMachineConstants.ControlPointUUID) {
-            respondToControlPoint(value, runControlPointProcedure(value, "gatt"), device)
+            if (preparedWrite || offset != 0) {
+                if (responseNeeded) server.sendResponse(device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null)
+                return
+            }
+            respondToControlPoint(value, runControlPointProcedure(value, "gatt:${device.address}"), device)
             if (responseNeeded) {
                 server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
             }
@@ -201,24 +203,26 @@ class FitnessMachineService(
 
     /**
      * DIRCON carries the same FTMS Control Point writes that GATT does, but the
-     * bridge has no BluetoothDevice to answer, so the response indication goes to
-     * every DIRCON subscriber and every connected GATT client instead.
+     * bridge carries the connection identity so only the requester gets a reply.
      */
+    @Synchronized
     override fun onDirConCharacteristicWrite(
         characteristic: BluetoothGattCharacteristic,
-        value: ByteArray
+        value: ByteArray,
+        clientId: String
     ): Boolean {
         if (characteristic.uuid != FitnessMachineConstants.ControlPointUUID) {
-            return super.onDirConCharacteristicWrite(characteristic, value)
+            return super.onDirConCharacteristicWrite(characteristic, value, clientId)
         }
-        respondToControlPoint(value, runControlPointProcedure(value, "dircon"), device = null)
+        respondToControlPoint(value, runControlPointProcedure(value, clientId), device = null, clientId = clientId)
         return true
     }
 
     private fun respondToControlPoint(
         request: ByteArray?,
         result: Int,
-        device: BluetoothDevice?
+        device: BluetoothDevice?,
+        clientId: String? = null
     ) {
         val opcode = request?.getOrNull(0)?.toInt()?.and(0xFF) ?: -1
         // Build Response Code indication: [0x80, requestOpCode, resultCode]
@@ -229,148 +233,110 @@ class FitnessMachineService(
                 (result and 0xFF).toByte()
             )
         )
-        server.notifyDirConCharacteristicChanged(controlPointCharacteristic)
         // FTMS mandates indications for Control Point
         if (device != null) {
             server.notifyCharacteristicChanged(device, controlPointCharacteristic, true)
         } else {
-            for (d in connectedDevices) {
-                server.notifyCharacteristicChanged(d, controlPointCharacteristic, true)
-            }
+            server.notifyDirConCharacteristicChanged(controlPointCharacteristic, clientId)
         }
     }
 
-    private fun runControlPointProcedure(value: ByteArray?, transport: String): Int {
-        val opcode = value?.getOrNull(0)?.toInt()?.and(0xFF) ?: -1
-        Timber.d("FTMS Control Point write: opcode=0x%02X, value=%s", opcode,
-            value?.joinToString(",") { "0x%02X".format(it) } ?: "null")
-        val result: Int
-
-        when (opcode) {
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.RequestControl -> {
-                    result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
-                }
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.Reset -> {
-                    ergController.disable()
-                    setTrainingStatus(FitnessMachineConstants.TrainingStatus.Idle)
-                    notifyFitnessMachineStatus(
-                        byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.Reset.toByte())
-                    )
-                    result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
-                }
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.StartOrResume -> {
-                    setTrainingStatus(FitnessMachineConstants.TrainingStatus.ManualMode)
-                    notifyFitnessMachineStatus(
-                        byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.StartedOrResumedByUser.toByte())
-                    )
-                    result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
-                }
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.StopOrPause -> {
-                    ergController.disable()
-                    setTrainingStatus(FitnessMachineConstants.TrainingStatus.Idle)
-                    notifyFitnessMachineStatus(
-                        byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.StoppedOrPausedByUser.toByte())
-                    )
-                    result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
-                }
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.SetTargetResistanceLevel -> {
-                    // sint16 in 0.1 units (e.g. 500 = 50.0%)
-                    if (!resistanceControlSupported) {
-                        Timber.d("FTMS SetTargetResistanceLevel refused: no brake control on this bike")
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.OpCodeNotSupported
-                    } else if (value != null && value.size >= 3) {
-                        val raw = (value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)
-                        val resistancePercent = (raw.toShort().toInt() / 10).coerceIn(0, 100)
-                        // PZAF has to go before the brake will listen. While it
-                        // is enabled the controller drops ordinary set-resistance
-                        // commands -- StartListnerTask checks is_pzaf_enabled()
-                        // and logs rather than storing the new target. Order is
-                        // enough to make this safe: both commands go through the
-                        // same AffernetService handler and the same controller
-                        // command listener, and pzaf_disable_control clears the
-                        // mode before that listener reads the next command.
-                        ergController.disable()
-                        sensorInterface.setResistance(resistancePercent)
-                        Timber.d("FTMS SetTargetResistanceLevel: raw=$raw -> $resistancePercent%")
-                        notifyFitnessMachineStatus(byteArrayOf(
-                            FitnessMachineConstants.FitnessMachineStatus.TargetResistanceLevelChanged.toByte(),
-                            value[1], value[2]
-                        ))
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
-                    } else {
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.InvalidParameter
-                    }
-                }
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.SetTargetPower -> {
-                    // sint16 watts
-                    if (!resistanceControlSupported) {
-                        Timber.d("FTMS SetTargetPower refused: no brake control on this bike")
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.OpCodeNotSupported
-                    } else if (value != null && value.size >= 3) {
-                        val watts = ((value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)).toShort().toInt()
-                        Timber.d("FTMS SetTargetPower: ${watts}W")
-                        if (ergController.isActive) {
-                            ergController.setTarget(watts)
-                        } else {
-                            ergController.enable(watts)
-                        }
-                        setTrainingStatus(FitnessMachineConstants.TrainingStatus.WattControl)
-                        notifyFitnessMachineStatus(byteArrayOf(
-                            FitnessMachineConstants.FitnessMachineStatus.TargetPowerChanged.toByte(),
-                            value[1], value[2]
-                        ))
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
-                    } else {
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.InvalidParameter
-                    }
-                }
-                FitnessMachineConstants.FitnessMachineControlPointProcedure.SetIndoorBikeSimulationParameters -> {
-                    // Sim mode: the app describes the road and the trainer works
-                    // out the resistance. Nothing works it out yet -- this parses,
-                    // logs and records the parameters so a real ride can show what
-                    // a controller app actually sends, which is what the gear and
-                    // physics model have to be built against. Resistance is left
-                    // exactly where it is.
-                    val parameters = SimulationParameters.parse(value)
-                    if (!resistanceControlSupported) {
-                        Timber.d("FTMS SetIndoorBikeSimulationParameters refused: no brake control on this bike")
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.OpCodeNotSupported
-                    } else if (parameters == null) {
-                        Timber.w("FTMS SetIndoorBikeSimulationParameters: short payload %s",
-                            value?.joinToString(" ") { "%02x".format(it) } ?: "null")
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.InvalidParameter
-                    } else {
-                        Timber.i("FTMS SetIndoorBikeSimulationParameters [%s]: %s (observed only, brake unchanged)",
-                            transport, parameters)
-                        // Echoing the parameters back as a status makes them
-                        // visible to every subscriber, so a laptop watching over
-                        // DIRCON sees the grades alongside the ride.
-                        notifyFitnessMachineStatus(byteArrayOf(
-                            FitnessMachineConstants.FitnessMachineStatus.IndoorBikeSimulationParametersChanged.toByte(),
-                            value!![1], value[2], value[3], value[4], value[5], value[6]
-                        ))
-                        result = FitnessMachineConstants.FitnessMachineControlPointResultCode.Success
-                    }
-                }
-                else -> {
-                    Timber.w("FTMS Control Point: unsupported opcode 0x%02X", opcode)
-                    result = FitnessMachineConstants.FitnessMachineControlPointResultCode.OpCodeNotSupported
-                }
+    private fun runControlPointProcedure(value: ByteArray?, clientId: String): Int {
+        val opcode = value?.firstOrNull()?.toInt()?.and(255) ?: -1
+        val previousOwner = trainerController.state.value.owner
+        val result = trainerController.command(clientId, value)
+        if (result == TrainerController.SUCCESS && opcode == 0 && previousOwner != null && previousOwner != clientId) {
+            notifyControlPermissionLost(previousOwner)
+        }
+        if (result == TrainerController.SUCCESS) {
+            val status = when (opcode) {
+                1 -> byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.Reset.toByte())
+                7 -> byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.StartedOrResumedByUser.toByte())
+                8 -> byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.StoppedOrPausedByUser.toByte(), value!![1])
+                4 -> byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.TargetResistanceLevelChanged.toByte()) + value!!.copyOfRange(1, 3)
+                5 -> byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.TargetPowerChanged.toByte()) + value!!.copyOfRange(1, 3)
+                17 -> byteArrayOf(FitnessMachineConstants.FitnessMachineStatus.IndoorBikeSimulationParametersChanged.toByte()) + value!!.copyOfRange(1, 7)
+                else -> null
             }
-
+            status?.let(::notifyFitnessMachineStatus)
+            setTrainingStatus(currentTrainingStatus())
+        }
         return result
+    }
+
+    /** Revoke only the old reservation; observers/new owners must not reacquire. */
+    private fun notifyControlPermissionLost(owner: String) {
+        fitnessMachineStatusCharacteristic.setValue(byteArrayOf(
+            FitnessMachineConstants.FitnessMachineStatus.ControlPermissionLost.toByte()))
+        if (owner.startsWith("dircon:")) {
+            server.notifyDirConCharacteristicChanged(fitnessMachineStatusCharacteristic, owner)
+        } else {
+            connectedDevices.firstOrNull { "gatt:${it.address}" == owner }?.let {
+                server.notifyCharacteristicChanged(it, fitnessMachineStatusCharacteristic, false)
+            }
+        }
     }
 
     override fun onDisconnected(device: BluetoothDevice) {
         super.onDisconnected(device)
-        if (connectedDevices.isEmpty()) {
-            ergController.disable()
-            Timber.d("Last FTMS client disconnected, ERG disabled")
+        trainerController.disconnected("gatt:${device.address}")
+    }
+
+    private fun currentTrainingStatus(cadence: Float = 0f): Int {
+        val state = trainerController.state.value
+        return when {
+            !state.controlEngaged -> FitnessMachineConstants.TrainingStatus.Idle
+            state.suspension != null || state.paused -> FitnessMachineConstants.TrainingStatus.Idle
+            state.mode == TrainerMode.Simulation -> FitnessMachineConstants.TrainingStatus.Other
+            state.mode == TrainerMode.Erg && ergController.isActive -> FitnessMachineConstants.TrainingStatus.WattControl
+            state.mode == TrainerMode.Resistance || cadence > 0 -> FitnessMachineConstants.TrainingStatus.ManualMode
+            else -> FitnessMachineConstants.TrainingStatus.Idle
         }
     }
 
+    /**
+     * Training Status, carrying the name of the loop that is holding the target.
+     *
+     * Which loop [ErgCoordinator] resolved is a decision with real consequences
+     * for a controller app -- the two behave differently and only one of them
+     * reports a stand-down -- and until now it had no representation on the wire
+     * at all, so anything outside this process had to be told by the rider.
+     *
+     * The Training Status characteristic already has the field for it. FTMS
+     * defines an optional UTF-8 status string after the status byte, announced
+     * by bit 0 of the flags, so this is the specification's own mechanism rather
+     * than a private extension: a client that does not want the string never
+     * looks past byte 1, and one that does gets the same words the
+     * configuration page shows the rider.
+     *
+     * The string is omitted entirely until a target has been sent, because
+     * before that no path has been resolved and naming one would be a guess.
+     */
+    private fun trainingStatusPayload(status: Int): ByteArray {
+        val path = when (ergController.state.value.path) {
+            ErgPath.Native -> "Bike PZAF"
+            ErgPath.Host -> "App PID"
+            ErgPath.None -> null
+        } ?: return byteArrayOf(0x00, status.toByte())
+
+        val flags = FitnessMachineConstants.TrainingStatusFlags.StringPresent
+        val mode = if (trainerController.state.value.mode == TrainerMode.Simulation) "SIM" else "ERG"
+        return byteArrayOf(flags.toByte(), status.toByte()) + "$mode · $path".toByteArray(Charsets.UTF_8)
+    }
+
+    /**
+     * Publishes Training Status, and only when it has actually changed.
+     *
+     * The comparison is over the whole payload rather than the status byte,
+     * which is what lets a path switch reach subscribers on its own: moving
+     * from the host loop to the controller's does not change the status -- both
+     * are watt control -- and under the old rule that change was invisible.
+     */
     private fun setTrainingStatus(status: Int) {
-        trainingStatusCharacteristic.setValue(byteArrayOf(0x00, status.toByte()))
+        val payload = trainingStatusPayload(status)
+        if (payload.contentEquals(trainingStatusCharacteristic.getValue())) return
+
+        trainingStatusCharacteristic.setValue(payload)
         server.notifyDirConCharacteristicChanged(trainingStatusCharacteristic)
         for (d in connectedDevices) {
             server.notifyCharacteristicChanged(d, trainingStatusCharacteristic, false)
@@ -415,26 +381,7 @@ class FitnessMachineService(
             server.notifyCharacteristicChanged(device, indoorBikeDataCharacteristic, false)
         }
 
-        val newStatus = when {
-            // Armed but stationary is still watt control. PZAF holds status 20 or
-            // 21 while the rider is stopped and takes the brake the moment they
-            // turn the cranks, so reporting Idle there tells a controller app the
-            // target was dropped when it was not. Observed on a stationary bike:
-            // the enable landed, the controller reported "enabled, low rpm", and
-            // the old rule immediately published Idle over the top of it.
-            ergController.isActive -> FitnessMachineConstants.TrainingStatus.WattControl.toByte()
-            cadence > 0 -> FitnessMachineConstants.TrainingStatus.ManualMode.toByte()
-            else -> FitnessMachineConstants.TrainingStatus.Idle.toByte()
-        }
-        // Keep the two-byte layout consistent when updating
-        val currentStatus = trainingStatusCharacteristic.getValue()
-        if (currentStatus == null || currentStatus.size < 2 || currentStatus[1] != newStatus) {
-            trainingStatusCharacteristic.setValue(byteArrayOf(0x00, newStatus))
-            server.notifyDirConCharacteristicChanged(trainingStatusCharacteristic)
-            for (device in connectedDevices) {
-                server.notifyCharacteristicChanged(device, trainingStatusCharacteristic, false)
-            }
-        }
+        setTrainingStatus(currentTrainingStatus(cadence))
     }
 
     init {
@@ -445,6 +392,14 @@ class FitnessMachineService(
         // the controller app the truth, so it stops drawing a target that is no
         // longer being held. The rider's target is kept by ErgCoordinator and
         // comes back from the overlay's ERG control.
+        // A path switch does not change the training status -- both loops are
+        // watt control -- so the republish has to be driven by the change
+        // itself rather than waiting for a status that will not move.
+        ergController.onPathChanged = { path ->
+            Timber.i("FTMS reporting ERG path: %s", path)
+            setTrainingStatus(currentTrainingStatus())
+        }
+
         ergController.onStandDown = { status ->
             val cause = if (status == PzafStatus.DISABLED_BY_KNOB ||
                 status == PzafStatus.DISABLED_BY_NO_USAGE_TIMEOUT
@@ -455,7 +410,8 @@ class FitnessMachineService(
             }
             Timber.w("FTMS reporting PZAF stand down: %s", PzafStatus.name(status))
             setTrainingStatus(FitnessMachineConstants.TrainingStatus.Idle)
-            notifyFitnessMachineStatus(byteArrayOf(cause.toByte()))
+            notifyFitnessMachineStatus(if (cause == FitnessMachineConstants.FitnessMachineStatus.StoppedOrPausedByUser)
+                byteArrayOf(cause.toByte(), 0x02) else byteArrayOf(cause.toByte()))
         }
     }
 }

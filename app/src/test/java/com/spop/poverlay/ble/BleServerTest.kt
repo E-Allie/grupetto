@@ -78,7 +78,7 @@ class BleServerTest {
         timeProvider = FakeTimeProvider()
         // Initialize with default time 0
         timeProvider.currentTime = 0
-        bleServer = BleServer(context, bluetoothManager, sensorInterface, ergController, timeProvider)
+        bleServer = BleServer(context, bluetoothManager, sensorInterface, ergController, mockk(relaxed = true), timeProvider)
     }
 
     @Test

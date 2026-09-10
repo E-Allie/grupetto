@@ -50,6 +50,16 @@ object FitnessMachineConstants {
         const val UserDataRetentionSupported = 1 shl 16
     }
 
+    /**
+     * Flags byte at the front of Training Status. Bit 0 says a UTF-8 status
+     * string follows the status byte; Grupetto uses it to name the ERG loop
+     * that is holding the target.
+     */
+    object TrainingStatusFlags {
+        const val StringPresent = 1 shl 0
+        const val ExtendedStringPresent = 1 shl 1
+    }
+
     object TrainingStatus {
         const val Other = 0x00
         const val Idle = 0x01

@@ -164,7 +164,9 @@ grupetto supports FTMS (Fitness Machine Service) controllable resistance and ERG
 
 **Resistance control:** Apps can set a target resistance level (0-100%) directly via the FTMS Control Point. The bike's resistance knob will move to the requested position.
 
-**ERG mode:** Apps can set a target power (25-1000W). A PID controller continuously adjusts the bike's resistance to maintain the target wattage regardless of cadence changes. ERG mode is automatically disabled when the app sends a resistance command, resets, stops, or disconnects.
+**ERG mode:** Apps can set a target power (25-800 W). The ERG Control setting selects native Bike+ Power Zone Auto-Follow or App PID; Auto probes native support and falls back to App PID when unavailable. ERG is disabled when the controlling app sends a resistance command, resets, stops, or disconnects. A detected rider override requires a deliberate local resume.
+
+BLE and DIRCON share one active control session. Telemetry observers and unused discovery reservations do not block another app from taking control, and observer disconnections do not stop an active workout.
 
 **Note:** Resistance control requires a Bike+ (Gen 2). The original Bike does not have a motorized resistance knob.
 

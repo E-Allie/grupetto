@@ -72,7 +72,7 @@ class DirConServer(
         coroutineContext.cancelChildren()
     }
 
-    fun notifyCharacteristicChanged(uuid: UUID, value: ByteArray) {
+    fun notifyCharacteristicChanged(uuid: UUID, value: ByteArray, clientId: String? = null) {
         val message = DirConMessage(
             identifier = DirConConstants.MessageUnsolicitedCharacteristicNotification,
             sequenceNumber = 0,
@@ -83,7 +83,7 @@ class DirConServer(
 
         synchronized(clients) {
             clients
-                .filter { it.isSubscribed(uuid) }
+                .filter { it.isSubscribed(uuid) && (clientId == null || it.id == clientId) }
                 .forEach { it.write(encoded) }
         }
     }
@@ -129,7 +129,7 @@ class DirConServer(
             DirConConstants.MessageWriteCharacteristic -> {
                 val characteristicUuid = message.uuid
                     ?: return errorResponse(message, DirConConstants.ResponseCharacteristicNotFound)
-                if (!bridge.writeCharacteristic(characteristicUuid, message.data)) {
+                if (!bridge.writeCharacteristic(characteristicUuid, message.data, session.id)) {
                     return errorResponse(message, DirConConstants.ResponseCharacteristicWriteFailed)
                 }
                 DirConMessage(
@@ -168,6 +168,7 @@ class DirConServer(
         )
 
     private inner class ClientSession(private val socket: Socket) {
+        val id = "dircon:${UUID.randomUUID()}"
         private val subscriptions = Collections.synchronizedSet(mutableSetOf<UUID>())
 
         fun run() {
@@ -206,6 +207,7 @@ class DirConServer(
             } finally {
                 clients.remove(this)
                 close()
+                bridge.onDisconnected(id)
             }
         }
 
@@ -225,7 +227,11 @@ class DirConServer(
                     socket.getOutputStream().write(bytes)
                     socket.getOutputStream().flush()
                 }
-            }.onFailure { Timber.d(it, "Failed to write DIRCON frame") }
+            }.onFailure {
+                Timber.d(it, "Failed to write DIRCON frame")
+                // Wake a blocked read so its finally block releases control ownership.
+                close()
+            }
         }
 
         fun close() {

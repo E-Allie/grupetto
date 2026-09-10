@@ -17,6 +17,7 @@ import com.spop.poverlay.dircon.DirConGattBridge
 import com.spop.poverlay.dircon.DirConServer
 import com.spop.poverlay.dircon.toDirConService
 import com.spop.poverlay.erg.ErgCoordinator
+import com.spop.poverlay.sim.TrainerController
 import com.spop.poverlay.sensor.heartrate.HeartRateManager
 import com.spop.poverlay.sensor.interfaces.SensorInterface
 import java.util.LinkedList
@@ -77,7 +78,8 @@ abstract class BaseBleService(val server: BleServer) {
     @Suppress("DEPRECATION")
     open fun onDirConCharacteristicWrite(
             characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
+            value: ByteArray,
+            clientId: String
     ): Boolean {
         characteristic.value = value
         return true
@@ -115,6 +117,7 @@ class BleServer(
         private val bluetoothManager: BluetoothManager,
         private val sensorInterface: SensorInterface,
         private val ergController: ErgCoordinator,
+        private val trainerController: TrainerController,
         private val timeProvider: TimeProvider = SystemTimeProvider()
 ) : BluetoothGattServerCallback(), CoroutineScope {
 
@@ -213,7 +216,7 @@ class BleServer(
             return characteristicValue(characteristic)
         }
 
-        override fun writeCharacteristic(uuid: UUID, value: ByteArray): Boolean {
+        override fun writeCharacteristic(uuid: UUID, value: ByteArray, clientId: String): Boolean {
             val owner = findServiceOwning(uuid) ?: return false
             val characteristic = owner.service.characteristics.first { it.uuid == uuid }
             val writable = characteristic.properties and
@@ -224,13 +227,15 @@ class BleServer(
             // Hand the write to the service that owns the characteristic. Without
             // this the FTMS Control Point would only ever be written to, never
             // acted on, so DIRCON clients could not drive resistance or ERG.
-            return owner.onDirConCharacteristicWrite(characteristic, value)
+            return owner.onDirConCharacteristicWrite(characteristic, value, clientId)
         }
+
+        override fun onDisconnected(clientId: String) { trainerController.disconnected(clientId) }
     }
 
     private fun baseServices(heartRateEnabled: Boolean): List<BaseBleService> {
         val services = mutableListOf<BaseBleService>(
-            FitnessMachineService(this, ergController, sensorInterface),
+            FitnessMachineService(this, ergController, sensorInterface, trainerController),
             CyclingPowerService(this),
             CyclingSpeedAndCadenceService(this),
             DeviceInformationService(this)
@@ -447,6 +452,7 @@ class BleServer(
 
     @Synchronized
     fun stop() {
+        trainerController.closeSession()
         isServerStarted = false
         isDirConOnlyStarted = false
         gattServerGeneration++
@@ -594,6 +600,7 @@ class BleServer(
         if (!isServerStarted || gattServer == null) return
 
         heartRateServiceEnabled = enable
+        trainerController.closeSession()
         Timber.i("Heart rate BLE service ${if (enable) "enabled" else "disabled"}")
 
         stopSensorDataUpdates()
@@ -662,10 +669,11 @@ class BleServer(
         }
     }
 
-    fun notifyDirConCharacteristicChanged(characteristic: BluetoothGattCharacteristic) {
+    fun notifyDirConCharacteristicChanged(characteristic: BluetoothGattCharacteristic, clientId: String? = null) {
         dirConServer?.notifyCharacteristicChanged(
             characteristic.uuid,
-            characteristicValue(characteristic)
+            characteristicValue(characteristic),
+            clientId
         )
     }
 
@@ -687,6 +695,8 @@ class BleServer(
         when (state) {
             BluetoothAdapter.STATE_OFF -> {
                 Timber.w("Bluetooth turned off, stopping advertising")
+                trainerController.state.value.owner?.takeIf { it.startsWith("gatt:") }
+                    ?.let(trainerController::disconnected)
                 isAdvertising = false
                 // Don't call stopAdvertising() as Bluetooth is already off
             }

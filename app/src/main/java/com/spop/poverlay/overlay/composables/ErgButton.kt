@@ -22,6 +22,8 @@ import androidx.compose.ui.unit.sp
 import com.spop.poverlay.GrupettoApplication
 import com.spop.poverlay.erg.ErgPath
 import com.spop.poverlay.erg.ErgState
+import com.spop.poverlay.sim.TrainerMode
+import com.spop.poverlay.sim.SimulationPhase
 
 /** Same footprint as the shifter: a label, a number, and a line of state. */
 val ErgButtonWidth = 130.dp
@@ -50,9 +52,13 @@ fun ErgButton(modifier: Modifier = Modifier) {
     val application = LocalContext.current.applicationContext as? GrupettoApplication
     val controller = application?.ergController ?: return
     val state by controller.state.collectAsState()
+    val trainer = application.trainerController
+    val control by trainer.state.collectAsState()
 
-    val hasTarget = state.targetWatts > 0
+    val hasTarget = control.mode != TrainerMode.Idle
+    val canResume = control.suspension != null || control.paused || control.simulation?.resumeRequired == true
     val color = when {
+        canResume -> ResumeColor
         state.active -> HoldingColor
         hasTarget -> ResumeColor
         else -> IdleColor
@@ -63,7 +69,11 @@ fun ErgButton(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "ERG",
+            text = when (control.mode) {
+                TrainerMode.Simulation -> "SIM"
+                TrainerMode.Resistance -> "Resistance"
+                else -> "ERG"
+            },
             color = Color.White,
             fontSize = 16.sp,
             fontWeight = FontWeight.Normal
@@ -73,22 +83,42 @@ fun ErgButton(modifier: Modifier = Modifier) {
             modifier = Modifier
                 .requiredWidth(96.dp)
                 .background(ButtonBackground, RoundedCornerShape(6.dp))
-                .clickable(enabled = state.active || hasTarget) { controller.toggle() }
+                .clickable(enabled = hasTarget || canResume) { trainer.toggle() }
                 .padding(vertical = 4.dp)
         ) {
             Text(
-                text = if (hasTarget) "${state.targetWatts}" else "--",
+                text = when {
+                    control.mode == TrainerMode.Simulation && control.simulation?.phase != SimulationPhase.Holding -> "0"
+                    control.mode == TrainerMode.Resistance -> "ON"
+                    hasTarget -> "${state.targetWatts}"
+                    else -> "--"
+                },
                 color = color,
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Bold
             )
         }
         Text(
-            text = captionFor(state),
+            text = when {
+                canResume -> "tap to resume"
+                control.mode == TrainerMode.Idle -> "waiting for app"
+                !control.controlEngaged -> "waiting for target"
+                control.mode == TrainerMode.Resistance -> "tap to stop"
+                control.simulation?.capped == true -> "limit ${control.simulation?.powerLimitWatts} W"
+                control.simulation?.phase == SimulationPhase.WaitingForCadence -> "start pedaling"
+                control.simulation?.phase == SimulationPhase.LowLoad -> "minimum load"
+                else -> captionFor(state)
+            },
             color = Color.White,
             fontSize = 12.sp,
             textAlign = TextAlign.Center
         )
+        control.simulation?.let { sim ->
+            sim.resumeTargetWatts?.let { watts ->
+                Text("$watts W @ ${sim.previewCadenceRpm?.toInt()} rpm",
+                    color = Color.LightGray, fontSize = 10.sp, textAlign = TextAlign.Center)
+            }
+        }
     }
 }
 
