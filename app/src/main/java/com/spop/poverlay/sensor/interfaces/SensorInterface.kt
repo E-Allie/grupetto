@@ -9,6 +9,8 @@ interface SensorInterface {
     val power: Flow<Float>
     val cadence: Flow<Float>
     val resistance: Flow<Float>
+    /** Unsmoothed requested brake target, for recognizing external control changes. */
+    val requestedResistance: Flow<Float> get() = resistance
     val speed
         get() = power.map(::calculateSpeedFromPelotonV1Power)
 

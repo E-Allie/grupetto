@@ -2,219 +2,216 @@ package com.spop.poverlay.erg
 
 import com.spop.poverlay.sensor.interfaces.SensorInterface
 import com.spop.poverlay.sensor.v2.PzafStatus
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
+import kotlin.coroutines.CoroutineContext
 
-/** Which loop is holding the target. */
 enum class ErgPath { None, Native, Host }
 
-/**
- * Everything the overlay and the configuration page need to know about ERG.
- *
- * [targetWatts] survives a stand-down on purpose. It is what the resume control
- * re-arms, and it is the whole reason a rider who bumps the knob mid-interval
- * does not have to wait for the next block for their app to send a new target.
- */
 data class ErgState(
     val active: Boolean = false,
     val targetWatts: Int = 0,
     val path: ErgPath = ErgPath.None,
-    /** Non-null when the controller dropped the mode without being asked to. */
     val standDownReason: String? = null,
-    /** What the probe concluded, for the configuration page. */
-    val capability: String? = null
+    val capability: String? = null,
+    val nativeAvailable: Boolean = false,
+    val suspended: Boolean = false
 )
 
 /**
- * Picks an ERG implementation and keeps the rider's target across its failures.
- *
- * Native PZAF is the default where the bike can do it, because the controller's
- * loop sees power without the 33ms service poll, the 200ms Binder poll and the
- * two-second EMA that the host loop has to compensate for. [PzafProbe] decides
- * whether that is this bike, by writing a PZAF configuration value and watching
- * for it to come back in the status packet.
- *
- * The awkward part is that the controller can stop on its own -- knob, homing,
- * calibration, low power, error, or sixty seconds without pedalling -- and
- * `pzaf_no_usage_timeout` measures the *rider*, not us, so there is no watchdog
- * that hands the brake back if this process dies. Two consequences shape this
- * class:
- *
- *  - [disable] is synchronous and unconditional. It runs on the caller's thread
- *    and sends the PZAF disable whether or not we believe PZAF was running, so
- *    every teardown path really does release the brake.
- *  - A stand-down is never re-armed automatically. The knob is the rider's only
- *    control once software has stopped, and anything that grabs the brake back
- *    fights that. [resume] is how the target comes back, and it is deliberately a
- *    thing a person does.
+ * The sole power/resistance actuator boundary. Slow capability resolution happens
+ * outside [commandLock]; the final eligibility check and hardware writes share
+ * that lock with disable. A completed disable therefore cannot be undone by an
+ * older request, even when its probe or Binder write was in flight.
  */
 class ErgCoordinator(
     private val sensorInterface: SensorInterface,
     private val modeProvider: () -> ErgMode,
-    private val hostController: HostErgController = HostErgController(sensorInterface)
+    hostController: PowerController? = null,
+    override val coroutineContext: CoroutineContext = SupervisorJob() + Dispatchers.Default,
+    private val capabilityProbe: suspend () -> PzafCapability = { PzafProbe(sensorInterface.titanControl).run() }
 ) : PowerController, CoroutineScope {
-
-    override val coroutineContext = SupervisorJob() + Dispatchers.Default
-
+    /** Shared with the trainer mode coordinator so Stop and SIM ticks are ordered. */
+    val commandLock = Any()
+    private val hostController: PowerController = hostController ?: HostErgController(
+        sensorInterface, commandLock, ::onHostStandDown, coroutineContext)
     private val titanControl = sensorInterface.titanControl
-
     private val nativeController = titanControl?.let {
-        NativePzafController(it, this, ::onNativeStandDown)
+        NativePzafController(it, this, ::onNativeStandDown, commandLock)
     }
-
     private val mutableState = MutableStateFlow(ErgState())
     val state: StateFlow<ErgState> = mutableState.asStateFlow()
 
-    /**
-     * Told about a stand-down so FTMS can drop its training status and notify.
-     * Set by [com.spop.poverlay.ble.FitnessMachineService].
-     */
-    @Volatile
-    var onStandDown: ((status: Int) -> Unit)? = null
+    @Volatile var onStandDown: ((status: Int) -> Unit)? = null
+    @Volatile var onPathChanged: ((path: ErgPath) -> Unit)? = null
 
-    /** Serialises path resolution and target changes against each other. */
-    private val lock = Mutex()
-
+    private val probeLock = Mutex()
     private var probe: Deferred<PzafCapability>? = null
     private var resolved: PowerController? = null
+    private var generation = 0L
+    private var targetJob: Job? = null
 
-    override val isActive: Boolean get() = mutableState.value.active
+    override val isActive: Boolean get() = state.value.active
+    override val targetWatts: Int get() = state.value.targetWatts
 
-    override val targetWatts: Int get() = mutableState.value.targetWatts
+    init { launch { probeLock.withLock { capability() } } }
 
-    init {
-        // Answer the capability question at startup rather than at the moment a
-        // rider is waiting for a target to take effect. Costs one configuration
-        // write and no brake movement.
-        launch { lock.withLock { capability() } }
+    override fun enable(watts: Int) { request(watts, fresh = true) }
+    override fun setTarget(watts: Int) { request(watts, fresh = false) }
+
+    /** SIM uses the same selected backend and automatic fallback as ERG. */
+    fun simulationTarget(watts: Int): Boolean = request(watts, fresh = true)
+
+    /** Null while Auto is probing; used to choose SIM's backend-specific limits. */
+    fun preferredPath(): ErgPath? = when (modeProvider()) {
+        ErgMode.Host -> ErgPath.Host
+        ErgMode.Native -> if (nativeController != null) ErgPath.Native else ErgPath.Host
+        ErgMode.Auto -> if (state.value.capability == null) null else
+            if (state.value.nativeAvailable) ErgPath.Native else ErgPath.Host
     }
 
-    override fun enable(watts: Int) = request(watts, fresh = true)
-
-    override fun setTarget(watts: Int) = request(watts, fresh = false)
-
-    /**
-     * Re-arm at the last target. The overlay's resume control, and the only way
-     * back after a stand-down short of the controller app sending a new target.
-     */
     fun resume() {
-        val watts = mutableState.value.targetWatts
-        if (watts <= 0) {
-            Timber.d("ERG resume ignored: no target has been set this session")
-            return
+        synchronized(commandLock) {
+            if (targetWatts <= 0) return
+            clearSuspension()
+            enable(targetWatts)
         }
-        Timber.i("ERG resumed by rider at %dW", watts)
-        enable(watts)
     }
 
-    /** What the overlay button does: stop if holding, otherwise pick the target back up. */
     fun toggle() {
-        if (isActive) disable() else resume()
+        if (isActive) suspendControl("Stopped by rider") else resume()
     }
 
-    private fun request(watts: Int, fresh: Boolean) {
-        // Recorded before the controller is even chosen: a target the rider asked
-        // for is worth remembering whether or not it can be honoured right now.
-        mutableState.update {
-            it.copy(targetWatts = watts, standDownReason = null)
-        }
-        launch {
-            lock.withLock {
-                val controller = select()
-                if (fresh || !controller.isActive) {
-                    controller.enable(watts)
-                } else {
-                    controller.setTarget(watts)
-                }
-                mutableState.update {
-                    it.copy(
-                        active = controller.isActive,
-                        targetWatts = controller.targetWatts,
-                        path = if (controller === nativeController) ErgPath.Native else ErgPath.Host
-                    )
+    /** Only a deliberate rider action should call this, never periodic targets. */
+    fun clearSuspension() = synchronized(commandLock) {
+        mutableState.update { it.copy(suspended = false, standDownReason = null) }
+    }
+
+    private fun request(watts: Int, fresh: Boolean): Boolean {
+        val job: Job
+        synchronized(commandLock) {
+            if (state.value.suspended || !sensorInterface.supportsResistanceControl) return false
+            // Updating a target is not permission to arm an inactive loop.
+            if (!fresh && !isActive && targetJob?.isActive != true) return false
+            val ticket = ++generation
+            targetJob?.cancel()
+            mutableState.update { it.copy(targetWatts = watts, standDownReason = null) }
+            job = launch(start = CoroutineStart.LAZY) {
+                try {
+                    val mode = modeProvider()
+                    val capability = if (mode == ErgMode.Auto) {
+                        probeLock.withLock { capability() }
+                    } else null
+                    val currentJob = currentCoroutineContext()[Job]!!
+                    synchronized(commandLock) write@ {
+                        if (ticket != generation || state.value.suspended || !currentJob.isActive) return@write
+                        val controller = when {
+                            mode == ErgMode.Host -> hostController
+                            mode == ErgMode.Native -> nativeController ?: hostController
+                            capability is PzafCapability.Supported -> nativeController ?: hostController
+                            else -> hostController
+                        }
+                        if (controller !== resolved) {
+                            resolved?.disable()
+                            resolved = controller
+                        }
+                        // A target in the same path should not reapply configuration/reset the watcher.
+                        if (controller.isActive) controller.setTarget(watts) else controller.enable(watts)
+                        val path = if (controller === nativeController) ErgPath.Native else ErgPath.Host
+                        val changed = state.value.path != path
+                        mutableState.update { it.copy(active = controller.isActive,
+                            targetWatts = controller.targetWatts, path = path) }
+                        if (changed) launch { onPathChanged?.invoke(path) }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    synchronized(commandLock) {
+                        if (ticket == generation) {
+                            Timber.e(error, "Power command failed")
+                            suspendControl(error.message ?: "Power command failed")
+                            launch { onStandDown?.invoke(PzafStatus.DISABLED_BY_ERROR) }
+                        }
+                    }
                 }
             }
+            targetJob = job
         }
+        job.start()
+        return true
     }
 
-    /**
-     * Synchronous, unconditional, and safe to call from anywhere.
-     *
-     * Both loops are stopped, and the PZAF disable goes out on any bike that has
-     * a controller regardless of which loop we thought was running. Native PZAF
-     * and host ERG have separate state and separate disable paths; disabling one
-     * has never disabled the other. This is also the last thing that runs on the
-     * way out of the process, so it does not get to be asynchronous.
-     */
-    override fun disable() {
-        hostController.disable()
-        nativeController?.disable()
-        titanControl?.disablePowerZoneAutoFollow()
+    private fun invalidate() {
+        ++generation
+        targetJob?.cancel()
+        targetJob = null
+    }
+
+    override fun disable() = synchronized(commandLock) {
+        invalidate()
+        disableLoops()
         mutableState.update { it.copy(active = false) }
     }
 
-    private fun onNativeStandDown(status: Int) {
-        val reason = PzafStatus.name(status)
-        Timber.w("ERG standing down: %s. Target %dW kept for resume.", reason, targetWatts)
-        mutableState.update { it.copy(active = false, standDownReason = reason) }
-        onStandDown?.invoke(status)
+    /** Disable first, then issue direct resistance in the same ordering boundary. */
+    fun setResistance(percent: Int): Boolean = synchronized(commandLock) {
+        if (state.value.suspended || !sensorInterface.supportsResistanceControl) return@synchronized false
+        disable()
+        sensorInterface.setResistance(percent.coerceIn(0, 100))
+        true
     }
 
-    /** Must be called under [lock]. */
-    private suspend fun select(): PowerController {
-        val mode = modeProvider()
-
-        val controller = when (mode) {
-            ErgMode.Host -> hostController
-            ErgMode.Native -> nativeController ?: hostController.also {
-                Timber.w("ERG mode is Native but this bike has no Titan controller; using host")
-            }
-            ErgMode.Auto -> when (capability()) {
-                is PzafCapability.Supported -> nativeController ?: hostController
-                is PzafCapability.Unsupported -> hostController
-            }
-        }
-
-        if (controller !== resolved) {
-            // Switching paths mid-session would otherwise leave the old one
-            // holding the brake, and only one of them can have it.
-            resolved?.disable()
-            resolved = controller
-            Timber.i(
-                "ERG using %s loop (mode %s)",
-                if (controller === nativeController) "native PZAF" else "host PID", mode
-            )
-        }
-        return controller
+    fun suspendControl(reason: String) = synchronized(commandLock) {
+        disable()
+        mutableState.update { it.copy(suspended = true, standDownReason = reason) }
     }
 
-    /** Must be called under [lock]. */
+    private fun disableLoops() {
+        // An exception in one backend must not prevent trying the other disable.
+        runCatching { hostController.disable() }.onFailure { Timber.e(it, "Host disable failed") }
+        runCatching { nativeController?.disable() }.onFailure { Timber.e(it, "Native disable failed") }
+        runCatching { titanControl?.disablePowerZoneAutoFollow() }.onFailure { Timber.e(it, "Titan disable failed") }
+    }
+
+    private fun onNativeStandDown(status: Int) = synchronized(commandLock) {
+        invalidate()
+        mutableState.update { it.copy(active = false, suspended = true, standDownReason = PzafStatus.name(status)) }
+        launch { onStandDown?.invoke(status) }
+    }
+
+    private fun onHostStandDown(reason: String) = synchronized(commandLock) {
+        suspendControl(reason)
+        launch { onStandDown?.invoke(if (reason == "Resistance changed outside app control")
+            PzafStatus.DISABLED_BY_KNOB else PzafStatus.DISABLED_BY_ERROR) }
+    }
+
+    /** Protected by probeLock. Probing cannot arm the brake. */
     private suspend fun capability(): PzafCapability {
-        probe?.let { pending ->
-            val result = pending.await()
-            if (result !is PzafCapability.Unsupported || !result.transient) return result
-            Timber.i("PZAF probe retrying: %s", result.reason)
+        // Cache for this application session, including missing native status.
+        // Retrying on every SIM target would repeatedly stall a working host
+        // fallback for the probe timeout. Restarting the app permits a new probe.
+        probe?.let { return it.await() }
+        val started = async {
+            try { capabilityProbe() } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Timber.w(error, "Native probe failed; host control remains available")
+                PzafCapability.Unsupported("native probe failed", transient = true)
+            }
         }
-        val started = async { PzafProbe(titanControl).run() }
         probe = started
         val result = started.await()
         val description = when (result) {
             is PzafCapability.Supported -> "native PZAF, controller firmware ${result.firmware}"
             is PzafCapability.Unsupported -> "host PID: ${result.reason}"
         }
-        Timber.i("ERG capability: %s", description)
-        mutableState.update { it.copy(capability = description) }
+        mutableState.update { it.copy(capability = description, nativeAvailable = result is PzafCapability.Supported) }
         return result
     }
 }

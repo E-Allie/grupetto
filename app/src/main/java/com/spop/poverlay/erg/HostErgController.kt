@@ -3,6 +3,9 @@ package com.spop.poverlay.erg
 import com.spop.poverlay.sensor.interfaces.SensorInterface
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.catch
+import kotlin.coroutines.CoroutineContext
 import timber.log.Timber
 import kotlin.math.abs
 
@@ -19,9 +22,14 @@ import kotlin.math.abs
  * comparison for bikes that do. It has a measured baseline; native has to beat
  * it rather than merely replace it.
  */
-class HostErgController(private val sensorInterface: SensorInterface) : PowerController, CoroutineScope {
+class HostErgController(
+    private val sensorInterface: SensorInterface,
+    private val commandLock: Any = Any(),
+    private val onStandDown: (String) -> Unit = {},
+    override val coroutineContext: CoroutineContext = SupervisorJob() + Dispatchers.Default,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 }
+) : PowerController, CoroutineScope {
 
-    override val coroutineContext = SupervisorJob() + Dispatchers.Default
 
     companion object {
         private const val CONTROL_LOOP_INTERVAL_MS = 100L
@@ -44,8 +52,8 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
         // EMA alpha for ~2-second time constant at 10Hz: alpha = dt / (tau + dt) = 0.1 / (2.0 + 0.1)
         private const val POWER_EMA_ALPHA = 0.047619047619047616
 
-        private const val MIN_TARGET_POWER = 25
-        private const val MAX_TARGET_POWER = 1000
+        const val MIN_TARGET_POWER = 25
+        const val MAX_TARGET_POWER = 1000
 
         // Target change large enough to be worth a feed-forward jump rather than
         // letting the proportional term walk there. Also the point at which the
@@ -84,6 +92,9 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
     private var kd = DEFAULT_KD
 
     private var controlJob: Job? = null
+    private var resistanceJob: Job? = null
+    private var generation = 0L
+    private val commandTracker = ResistanceCommandTracker()
     @Volatile
     private var targetPowerWatts = 100
     @Volatile
@@ -107,13 +118,13 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
     /** Wall clock after which PID may act again following a feed-forward jump. */
     private var feedForwardSettleUntil = 0L
 
-    override fun enable(watts: Int) {
+    override fun enable(watts: Int) = synchronized(commandLock) {
         // FitnessMachineService already refuses SetTargetPower on bikes without a
         // motorised brake; this is the same guard at the other end of the call,
         // so ERG can never spin a control loop that cannot move anything.
         if (!sensorInterface.supportsResistanceControl) {
             Timber.w("ERG requested on a bike without resistance control; ignoring")
-            return
+            return@synchronized
         }
         val clamped = watts.coerceIn(MIN_TARGET_POWER, MAX_TARGET_POWER)
         targetPowerWatts = clamped
@@ -123,14 +134,18 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
         Timber.d("ERG enabled: target=${clamped}W, PID gains: Kp=$kp, Ki=$ki, Kd=$kd")
     }
 
-    override fun disable() {
-        if (!active) return
+    override fun disable() = synchronized(commandLock) {
+        ++generation
+        if (!active) return@synchronized
         Timber.d("ERG disabled (was: target=${targetPowerWatts}W)")
         active = false
         stopControlLoop()
+        resistanceJob?.cancel()
+        resistanceJob = null
     }
 
-    override fun setTarget(watts: Int) {
+    override fun setTarget(watts: Int) = synchronized(commandLock) {
+        if (!active) return@synchronized
         val clamped = watts.coerceIn(MIN_TARGET_POWER, MAX_TARGET_POWER)
         if (clamped != targetPowerWatts) {
             val previousTarget = targetPowerWatts
@@ -161,20 +176,53 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
 
     private fun startControlLoop() {
         if (controlJob?.isActive == true) return
+        val ticket = ++generation
         controlJob = launch {
             // Initialize currentResistance from the sensor's current reading
-            try {
-                currentResistance = sensorInterface.resistance.first().toDouble()
-            } catch (_: Exception) {
-                currentResistance = 50.0
+            val initial = try {
+                withTimeout(1000) { sensorInterface.requestedResistance.first().toDouble() }
+            } catch (timeout: TimeoutCancellationException) {
+                fail(ticket, "No resistance feedback")
+                return@launch
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                fail(ticket, "Resistance feedback failed")
+                return@launch
+            }
+            synchronized(commandLock) {
+                if (!active || ticket != generation) return@launch
+                if (!initial.isFinite() || initial !in 0.0..100.0) {
+                    disable()
+                    onStandDown("Invalid resistance feedback")
+                    return@launch
+                }
+                currentResistance = initial
+                commandTracker.reset(initial.toInt(), nowMs())
+                resistanceJob = launch {
+                    sensorInterface.requestedResistance.catch { fail(ticket, "Resistance feedback failed") }.collect { resistance ->
+                        synchronized(commandLock) {
+                            if (active && ticket == generation && (!resistance.isFinite() ||
+                                    commandTracker.isUnexpected(resistance.toInt(), nowMs()))) {
+                                disable()
+                                onStandDown("Resistance changed outside app control")
+                            }
+                        }
+                    }
+                }
             }
             Timber.d("PID control loop started, initial resistance: ${currentResistance.toInt()}")
 
             while (coroutineContext.isActive && active) {
                 try {
-                    executeControlLoop()
+                    executeControlLoop(ticket)
+                } catch (timeout: TimeoutCancellationException) {
+                    fail(ticket, "Power or cadence data lost")
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (e: Exception) {
                     Timber.e(e, "Error in PID control loop iteration")
+                    fail(ticket, "App PID control failed")
                 }
                 delay(CONTROL_LOOP_INTERVAL_MS)
             }
@@ -186,19 +234,28 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
         controlJob = null
     }
 
-    private suspend fun executeControlLoop() {
+    private suspend fun executeControlLoop(ticket: Long) {
         // Read current power and cadence from sensor flows
-        val rawPower = try {
+        val rawPower = withTimeout(1000) {
             sensorInterface.power.first().toDouble()
-        } catch (_: Exception) {
-            return
         }
-        val cadence = try {
+        val cadence = withTimeout(1000) {
             sensorInterface.cadence.first().toDouble()
-        } catch (_: Exception) {
-            return
         }
 
+        currentCoroutineContext().ensureActive()
+        synchronized(commandLock) {
+            if (!active || ticket != generation) return
+            if (!rawPower.isFinite() || !cadence.isFinite()) {
+                disable()
+                onStandDown("Invalid power or cadence")
+                return
+            }
+            updateControl(rawPower, cadence)
+        }
+    }
+
+    private fun updateControl(rawPower: Double, cadence: Double) {
         // Smooth power with EMA
         if (!isSmoothedPowerInitialized) {
             isSmoothedPowerInitialized = true
@@ -240,8 +297,8 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
                         "-> resistance ${seeded.toInt()}% (was ${currentResistance.toInt()}%)"
                 )
                 currentResistance = seeded
-                sensorInterface.setResistance(seeded.toInt())
-                feedForwardSettleUntil = System.currentTimeMillis() + FEED_FORWARD_SETTLE_MS
+                writeResistance(seeded.toInt())
+                feedForwardSettleUntil = nowMs() + FEED_FORWARD_SETTLE_MS
                 return
             }
         }
@@ -250,7 +307,7 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
         // The EMA above keeps converging while this holds; only PID is paused,
         // and the derivative reference is carried along so resuming does not look
         // like a step change to the D term.
-        if (System.currentTimeMillis() < feedForwardSettleUntil) {
+        if (nowMs() < feedForwardSettleUntil) {
             previousSmoothedPower = smoothedPower
             Timber.v("ERG settling after feed-forward, PID held")
             return
@@ -297,7 +354,7 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
 
         val newResistanceInt = newResistance.toInt()
         if (newResistanceInt != currentResistance.toInt()) {
-            sensorInterface.setResistance(newResistanceInt)
+            writeResistance(newResistanceInt)
             Timber.d(
                 "PID: target=$targetPowerWatts, power=${smoothedPower.toInt()} (raw=${rawPower.toInt()}), " +
                     "error=${error.toInt()}, Kp=${"%.4f".format(effectiveKp)}" +
@@ -308,5 +365,18 @@ class HostErgController(private val sensorInterface: SensorInterface) : PowerCon
         }
 
         currentResistance = newResistance
+    }
+
+    /** Called only under commandLock, including feed-forward writes. */
+    private fun writeResistance(target: Int) {
+        commandTracker.commanded(target, nowMs())
+        sensorInterface.setResistance(target)
+    }
+
+    private fun fail(ticket: Long, reason: String) = synchronized(commandLock) {
+        if (active && ticket == generation) {
+            disable()
+            onStandDown(reason)
+        }
     }
 }

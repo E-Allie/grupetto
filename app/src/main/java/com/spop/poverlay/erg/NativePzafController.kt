@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
 /**
@@ -37,7 +38,8 @@ class NativePzafController(
      * the knob, the bike started homing, the controller errored, or nobody
      * pedalled for a minute. Never called from [disable].
      */
-    private val onStandDown: (status: Int) -> Unit
+    private val onStandDown: (status: Int) -> Unit,
+    private val commandLock: Any = Any()
 ) : PowerController {
 
     @Volatile
@@ -49,8 +51,9 @@ class NativePzafController(
         private set
 
     private var watchJob: Job? = null
+    private var watchGeneration = 0L
 
-    override fun enable(watts: Int) {
+    override fun enable(watts: Int) = synchronized(commandLock) {
         val clamped = watts.coerceIn(TitanControl.PZAF_POWER_RANGE)
         targetWatts = clamped
         applyConfiguration()
@@ -60,23 +63,21 @@ class NativePzafController(
         startWatching()
     }
 
-    override fun setTarget(watts: Int) {
+    override fun setTarget(watts: Int) = synchronized(commandLock) {
+        if (!isActive) return@synchronized
         val clamped = watts.coerceIn(TitanControl.PZAF_POWER_RANGE)
-        if (clamped == targetWatts && isActive) return
+        if (clamped == targetWatts) return@synchronized
         targetWatts = clamped
-        // The same transaction sets and enables, so this re-arms as well as
-        // retargets. pzaf_mode_set_power_sp resets the controller's PID whenever
+        // The transaction also enables: eligibility must be checked before it.
+        // pzaf_mode_set_power_sp resets the controller's PID whenever
         // the setpoint moves by more than half a watt, so there is no windup to
         // clear from here.
         control.setPowerZoneAutoFollow(clamped)
         Timber.d("PZAF target %dW", clamped)
-        if (!isActive) {
-            isActive = true
-            startWatching()
-        }
     }
 
-    override fun disable() {
+    override fun disable() = synchronized(commandLock) {
+        ++watchGeneration
         watchJob?.cancel()
         watchJob = null
         if (!isActive) {
@@ -84,7 +85,7 @@ class NativePzafController(
             // mode is already off, and this path is also the teardown for a
             // process that may not know what it left running.
             control.disablePowerZoneAutoFollow()
-            return
+            return@synchronized
         }
         isActive = false
         control.disablePowerZoneAutoFollow()
@@ -102,10 +103,10 @@ class NativePzafController(
      * actually settled on comes back at packet offsets 248..251.
      */
     private fun applyConfiguration() {
-        control.setPzafRampUpRate(DEFAULT_RAMP_UP)
-        control.setPzafRampDownRate(DEFAULT_RAMP_DOWN)
-        control.setPzafMaxResistance(DEFAULT_MAX_RESISTANCE)
-        control.setPzafMinUpdateRpm(DEFAULT_MIN_UPDATE_RPM)
+        check(control.setPzafRampUpRate(DEFAULT_RAMP_UP)) { "PZAF ramp-up configuration failed" }
+        check(control.setPzafRampDownRate(DEFAULT_RAMP_DOWN)) { "PZAF ramp-down configuration failed" }
+        check(control.setPzafMaxResistance(DEFAULT_MAX_RESISTANCE)) { "PZAF resistance configuration failed" }
+        check(control.setPzafMinUpdateRpm(DEFAULT_MIN_UPDATE_RPM)) { "PZAF cadence configuration failed" }
     }
 
     /**
@@ -120,41 +121,27 @@ class NativePzafController(
      */
     private fun startWatching() {
         watchJob?.cancel()
+        val ticket = ++watchGeneration
         watchJob = scope.launch {
-            var armed = false
-            val armDeadline = System.currentTimeMillis() + ARM_GRACE_MS
-
-            val ending = control.status.first { packet ->
-                val status = packet.pzafStatus
-                when {
-                    PzafStatus.isEnabled(status) -> {
-                        if (!armed) {
-                            armed = true
-                            Timber.i(
-                                "PZAF armed: %s, controller settled on %s",
-                                PzafStatus.name(status), packet.pzafSummary()
-                            )
-                        }
-                        false
-                    }
-                    armed -> true
-                    System.currentTimeMillis() >= armDeadline -> true
-                    else -> false
-                }
+            val armed = withTimeoutOrNull(ARM_GRACE_MS) {
+                control.status.first { PzafStatus.isEnabled(it.pzafStatus) }
             }
-
-            val status = ending.pzafStatus
-            if (armed) {
-                Timber.w("PZAF stood down on its own: %s", PzafStatus.name(status))
+            val status = if (armed != null) {
+                Timber.i("PZAF armed: %s", armed.pzafSummary())
+                control.status.first { !PzafStatus.isEnabled(it.pzafStatus) }.pzafStatus
             } else {
-                Timber.w(
-                    "PZAF never armed within %dms, last status %s",
-                    ARM_GRACE_MS, PzafStatus.name(status)
-                )
+                Timber.w("PZAF never armed within %dms", ARM_GRACE_MS)
+                PzafStatus.DISABLED_BY_NO_COMMS
             }
-            isActive = false
-            watchJob = null
-            onStandDown(status)
+            synchronized(commandLock) {
+                if (ticket != watchGeneration || !isActive) return@synchronized
+                isActive = false
+                watchJob = null
+                // An arm timeout is a failure, even if firmware enabled without a status echo.
+                runCatching { control.disablePowerZoneAutoFollow() }
+                    .onFailure { Timber.e(it, "Disable after native stand-down failed") }
+                onStandDown(status)
+            }
         }
     }
 
@@ -162,7 +149,21 @@ class NativePzafController(
         const val DEFAULT_RAMP_UP = 50
         const val DEFAULT_RAMP_DOWN = 8
         const val DEFAULT_MAX_RESISTANCE = 100
-        const val DEFAULT_MIN_UPDATE_RPM = 40
+
+        /**
+         * The cadence below which the controller stops correcting and holds its
+         * last resistance. 30 is a floor rather than a preference:
+         * `BikePZAFUtil` accepts 30..120 and `BikeHWCommunicator` drops anything
+         * outside that without sending, so a lower number is not a lower
+         * threshold -- it is no write at all, leaving whatever the previous
+         * caller set. Measured: a write of 25 logged in `PelotonServiceHelper`
+         * and never reached `BikeHWCommunicator`, and the controller stayed on
+         * the 40 the probe had left there.
+         *
+         * The controller has a second, hardcoded floor at 10 RPM where it resets
+         * its PID; 10..30 is not reachable through this transaction.
+         */
+        const val DEFAULT_MIN_UPDATE_RPM = 30
 
         /**
          * How long to allow between the enable going out and the first enabled
