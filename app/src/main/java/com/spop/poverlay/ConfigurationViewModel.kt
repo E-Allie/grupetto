@@ -70,7 +70,7 @@ class ConfigurationViewModel(
     fun onSimulationSettingsChanged(settings: SimulationSettings) {
         val capabilitiesChanged = settings.enabled != simulationSettings.value.enabled
         configurationRepository.setSimulationSettings(settings)
-        if (capabilitiesChanged) syncOutboundTransports()
+        if (capabilitiesChanged) syncOutboundTransports(refreshCapabilities = true)
     }
 
     private val bleServer = (application as GrupettoApplication).bleServer
@@ -137,12 +137,16 @@ class ConfigurationViewModel(
         }
     }
 
-    private fun syncOutboundTransports() {
-        bleServer.stop()
-        bleServer.setDirConTransportEnabled(dirConEnabled.value)
-
-        if (bleTxEnabled.value && hasBluetoothPermissions()) {
+    private fun syncOutboundTransports(refreshCapabilities: Boolean = false) {
+        val shouldRunBle = bleTxEnabled.value && hasBluetoothPermissions()
+        if (shouldRunBle) {
+            // Recreate the FTMS feature bitmap when the rider changes SIM support.
+            if (refreshCapabilities) bleServer.stop()
+            bleServer.setDirConTransportEnabled(dirConEnabled.value)
             bleServer.start()
+        } else {
+            bleServer.stop()
+            bleServer.setDirConTransportEnabled(dirConEnabled.value)
         }
     }
 

@@ -204,12 +204,12 @@ class BleServer(
 
     //ADD OR EDIT SERVICES HERE
     private fun setupServices() {
-        servicesToRegister.addAll(baseServices(heartRateEnabled = heartRateServiceEnabled))
+        servicesToRegister.addAll(baseServices())
         registerNextService()
     }
 
     private val dirConBridge = object : DirConGattBridge {
-        override fun services() = registeredServices.map { it.service.toDirConService() }
+        override fun services() = advertisedServices().map { it.service.toDirConService() }
 
         override fun readCharacteristic(uuid: UUID): ByteArray? {
             val characteristic = findGattCharacteristic(uuid) ?: return null
@@ -233,18 +233,23 @@ class BleServer(
         override fun onDisconnected(clientId: String) { trainerController.disconnected(clientId) }
     }
 
-    private fun baseServices(heartRateEnabled: Boolean): List<BaseBleService> {
-        val services = mutableListOf<BaseBleService>(
+    private fun baseServices(): List<BaseBleService> {
+        return listOf(
             FitnessMachineService(this, ergController, sensorInterface, trainerController),
             CyclingPowerService(this),
             CyclingSpeedAndCadenceService(this),
-            DeviceInformationService(this)
+            DeviceInformationService(this),
+            // Keep the GATT database stable for the lifetime of the server. Rebuilding the
+            // database when a heart-rate sensor connects can race Android's asynchronous
+            // service deletion, particularly on Android 11 vendor Bluetooth stacks.
+            HeartRateService(this)
         )
-        if (heartRateEnabled) {
-            services.add(HeartRateService(this))
-        }
-        return services
     }
+
+    private fun advertisedServices(): List<BaseBleService> =
+        registeredServices.filter {
+            heartRateServiceEnabled || it.service.uuid != HeartRateConstants.ServiceUUID
+        }
 
     private fun callbackForGeneration(generation: Long) =
         object : BluetoothGattServerCallback() {
@@ -516,14 +521,11 @@ class BleServer(
     private fun closeGattServer(server: BluetoothGattServer?) {
         if (server == null) return
 
-        try {
-            server.clearServices()
-        } catch (e: SecurityException) {
-            Timber.e(e, "Missing bluetooth permissions while clearing GATT services")
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to clear GATT services")
-        }
-
+        // BluetoothGattServer.close() unregisters the server, and Android's GattService
+        // deletes all of its services as part of that operation. Calling clearServices()
+        // immediately before close() starts the same asynchronous deletion twice. Some
+        // Android 11 vendor stacks then throw ConcurrentModificationException in
+        // GattService.deleteServices(), leaving orphaned native services behind.
         try {
             server.close()
         } catch (e: SecurityException) {
@@ -555,7 +557,7 @@ class BleServer(
 
         heartRateServiceEnabled = HeartRateManager.connectedDevice.value != null
         registeredServices.clear()
-        registeredServices.addAll(baseServices(heartRateEnabled = heartRateServiceEnabled))
+        registeredServices.addAll(baseServices())
         startDirCon()
         startSensorDataUpdates()
         isDirConOnlyStarted = true
@@ -600,25 +602,21 @@ class BleServer(
         if (!isServerStarted || gattServer == null) return
 
         heartRateServiceEnabled = enable
-        trainerController.closeSession()
         Timber.i("Heart rate BLE service ${if (enable) "enabled" else "disabled"}")
 
-        stopSensorDataUpdates()
-        stopDirCon()
-        stopAdvertising()
-        try {
-            gattServer?.clearServices()
-        } catch (error: SecurityException) {
-            Timber.e(error, "Bluetooth permission lost during service refresh")
-            stop()
+        if (currentlyRegisteringService != null || servicesToRegister.isNotEmpty()) {
+            Timber.d("Deferring heart-rate advertisement update until GATT setup completes")
             return
         }
-        registeredServices.clear()
-        servicesToRegister.clear()
-        currentlyRegisteringService = null
 
-        servicesToRegister.addAll(baseServices(heartRateEnabled = enable))
-        registerNextService()
+        // The heart-rate GATT service is registered up front. Only its discoverability is
+        // changed here, so connecting/disconnecting a sensor never mutates the live GATT
+        // database or races the platform's asynchronous service cleanup.
+        // DIRCON discovery reads advertisedServices() on each request. Its mDNS
+        // UUID list already includes heart rate, so connected controllers can stay
+        // on the same sockets and retain their active trainer session.
+        stopAdvertising()
+        startAdvertising()
     }
 
     private fun startDirCon() {
@@ -783,14 +781,10 @@ class BleServer(
             
             Timber.w("Watchdog: Advertising is not active, reason: $reason. Restarting...")
             
-            // If we have connected devices, just restart advertising (don't reset GATT server)
-            if (hasConnectedDevices()) {
-                Timber.i("Restarting advertising only (preserving connections)")
-                startAdvertising()
-            } else {
-                // No connections, safe to do full restart
-                restartGattAndAdvertising("Watchdog detected inactive advertising")
-            }
+            // Retrying advertising does not require rebuilding the GATT database. Rebuilding
+            // here can repeatedly exercise buggy vendor teardown paths and orphan services.
+            Timber.i("Retrying advertising without rebuilding the GATT server")
+            startAdvertising()
         } else if (isAdvertising) {
             val timeSinceStart = System.currentTimeMillis() - lastAdvertisingStartTime
             Timber.d("Watchdog: Advertising active for ${timeSinceStart / 1000}s")
@@ -861,7 +855,7 @@ class BleServer(
         if (isAdvertising) {
             return
         }
-        val serviceUuids = registeredServices.map { ParcelUuid(it.service.uuid) }
+        val serviceUuids = advertisedServices().map { ParcelUuid(it.service.uuid) }
         if (serviceUuids.isEmpty()) {
             return
         }

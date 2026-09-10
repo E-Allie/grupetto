@@ -1,19 +1,27 @@
 package com.spop.poverlay.ble
 
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothGattServer
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import com.spop.poverlay.erg.ErgCoordinator
+import com.spop.poverlay.dircon.DirConGattBridge
+import com.spop.poverlay.dircon.DirConServer
+import com.spop.poverlay.sim.TrainerController
 import com.spop.poverlay.sensor.interfaces.SensorInterface
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkStatic
+import io.mockk.verify
+import kotlinx.coroutines.flow.flowOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
@@ -66,6 +74,7 @@ class BleServerTest {
     private lateinit var bluetoothManager: BluetoothManager
     private lateinit var sensorInterface: SensorInterface
     private lateinit var ergController: ErgCoordinator
+    private lateinit var trainerController: TrainerController
     private lateinit var timeProvider: FakeTimeProvider
     private lateinit var bleServer: BleServer
 
@@ -75,10 +84,14 @@ class BleServerTest {
         bluetoothManager = mockk(relaxed = true)
         sensorInterface = mockk(relaxed = true)
         ergController = mockk(relaxed = true)
+        trainerController = mockk(relaxed = true)
+        every { sensorInterface.power } returns flowOf(0f)
+        every { sensorInterface.cadence } returns flowOf(0f)
+        every { sensorInterface.resistance } returns flowOf(0f)
         timeProvider = FakeTimeProvider()
         // Initialize with default time 0
         timeProvider.currentTime = 0
-        bleServer = BleServer(context, bluetoothManager, sensorInterface, ergController, mockk(relaxed = true), timeProvider)
+        bleServer = BleServer(context, bluetoothManager, sensorInterface, ergController, trainerController, timeProvider)
     }
 
     @Test
@@ -221,6 +234,81 @@ class BleServerTest {
             unmockkStatic(ContextCompat::class)
         }
     }
+
+    @Test
+    fun `stop closes GATT server without clearing services first`() {
+        val gattServer = mockk<BluetoothGattServer>(relaxed = true)
+        BleServer::class.java.getDeclaredField("gattServer").apply {
+            isAccessible = true
+            set(bleServer, gattServer)
+        }
+
+        bleServer.stop()
+
+        verify(exactly = 0) { gattServer.clearServices() }
+        verify(exactly = 1) { gattServer.close() }
+        verify(exactly = 1) { trainerController.closeSession() }
+    }
+
+    @Test
+    fun `heart rate changes keep the GATT and DIRCON control sessions open`() {
+        val gatt = mockk<BluetoothGattServer>(relaxed = true)
+        val dirCon = mockk<DirConServer>(relaxed = true)
+        field("gattServer").set(bleServer, gatt)
+        field("dirConServer").set(bleServer, dirCon)
+        field("isServerStarted").setBoolean(bleServer, true)
+
+        updateHeartRate(true)
+        updateHeartRate(false)
+
+        assertSame(gatt, field("gattServer").get(bleServer))
+        assertSame(dirCon, field("dirConServer").get(bleServer))
+        verify(exactly = 0) { gatt.clearServices() }
+        verify(exactly = 0) { gatt.close() }
+        verify(exactly = 0) { dirCon.stop() }
+        verify(exactly = 0) { trainerController.closeSession() }
+    }
+
+    @Test
+    fun `heart rate discovery changes without replacing registered services`() {
+        val gatt = mockk<BluetoothGattServer>(relaxed = true)
+        field("gattServer").set(bleServer, gatt)
+        field("isServerStarted").setBoolean(bleServer, true)
+        fun service(uuid: java.util.UUID): BaseBleService {
+            val service = mockk<BluetoothGattService>(relaxed = true)
+            every { service.uuid } returns uuid
+            every { service.characteristics } returns emptyList()
+            val wrapper = mockk<BaseBleService>()
+            every { wrapper.service } returns service
+            return wrapper
+        }
+        val ftms = service(FitnessMachineConstants.ServiceUUID)
+        val heartRate = service(HeartRateConstants.ServiceUUID)
+        @Suppress("UNCHECKED_CAST")
+        val registered = field("registeredServices").get(bleServer) as MutableList<BaseBleService>
+        registered.addAll(listOf(ftms, heartRate))
+        // A sensor may connect before asynchronous GATT registration finishes.
+        field("currentlyRegisteringService").set(bleServer, ftms)
+        val bridge = field("dirConBridge").get(bleServer) as DirConGattBridge
+
+        assertEquals(listOf(FitnessMachineConstants.ServiceUUID), bridge.services().map { it.uuid })
+        updateHeartRate(true)
+        assertEquals(listOf(FitnessMachineConstants.ServiceUUID, HeartRateConstants.ServiceUUID),
+            bridge.services().map { it.uuid })
+        updateHeartRate(false)
+        assertEquals(listOf(FitnessMachineConstants.ServiceUUID), bridge.services().map { it.uuid })
+        assertEquals(listOf(ftms, heartRate), registered)
+        verify(exactly = 0) { gatt.clearServices() }
+        verify(exactly = 0) { gatt.close() }
+        verify(exactly = 0) { trainerController.closeSession() }
+    }
+
+    private fun field(name: String) = BleServer::class.java.getDeclaredField(name)
+        .apply { isAccessible = true }
+
+    private fun updateHeartRate(enabled: Boolean) = BleServer::class.java
+        .getDeclaredMethod("updateHeartRateServiceRegistration", Boolean::class.javaPrimitiveType)
+        .apply { isAccessible = true }.invoke(bleServer, enabled)
 }
 
 class FakeTimeProvider : TimeProvider {
