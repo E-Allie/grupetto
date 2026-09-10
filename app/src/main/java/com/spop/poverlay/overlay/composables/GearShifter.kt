@@ -39,20 +39,20 @@ private val ButtonBackground = Color(0x33FFFFFF)
  * and a BLE HID keypad is what the MyWhoosh and Rouvy communities use, at the
  * cost of making the app a BLE central as well as a peripheral.
  *
- * The gear does not drive anything yet. It moves [VirtualGears], which the ride
- * recorder logs, so a recorded session shows what the rider selected alongside
- * what a controller app was asking for.
+ * Changes [VirtualGears], which supplies the simulation model.
+ * Gear changes are retained but do not change an explicit ERG target.
  */
 @Composable
 fun GearShifter(modifier: Modifier = Modifier) {
     val gear by VirtualGears.gear.collectAsState()
+    val profile by VirtualGears.profile.collectAsState()
 
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Gear",
+            text = "SIM gear",
             color = Color.White,
             fontSize = 16.sp,
             fontWeight = FontWeight.Normal
@@ -74,7 +74,7 @@ fun GearShifter(modifier: Modifier = Modifier) {
             ShiftButton(label = "+") { VirtualGears.shiftUp() }
         }
         Text(
-            text = "%.2f".format(VirtualGears.ratioFor(gear)),
+            text = "%.2f".format(com.spop.poverlay.sim.GearRatios.ratioFor(gear, profile)),
             color = Color.White,
             fontSize = 12.sp
         )

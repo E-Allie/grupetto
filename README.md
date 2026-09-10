@@ -170,6 +170,23 @@ BLE and DIRCON share one active control session. Telemetry observers and unused 
 
 **Note:** Resistance control requires a Bike+ (Gen 2). The original Bike does not have a motorized resistance knob.
 
+## Terrain resistance and virtual gears
+
+Enable **Terrain resistance** in the **Simulation** settings on Bike+ to let a
+connected FTMS app's hills and Grupetto's virtual gears control resistance.
+Simulation uses the selected ERG backend. Explicit ERG targets remain independent
+of virtual gearing and the SIM power limit.
+
+- Set rider and virtual road bicycle weights in kg or lb; defaults are 75 kg and 8 kg.
+- Choose Climbing or Road gearing, each with 24 virtual gears. Keep the game's gear fixed when using Grupetto's shifter.
+- Set the SIM power limit (default 140 W). It caps requested terrain power; measured power may overshoot and hardware limits still apply.
+- Low cadence releases load. Restart requires a tap by default; optional automatic resume waits for minimum-resistance feedback and steady pedaling.
+- The overlay displays the active mode, load limit and resume status. Stop and detected rider overrides still require deliberate local resume.
+
+Terrain control is experimental. Its power demand uses cadence, the selected
+virtual gear, configured mass and the received gradient/wind coefficients.
+Minimum resistance does not imply zero measured power.
+
 # Reporting Issues
 
 Please do not approach Peloton with issues related to this. They have no duty to support a reverse

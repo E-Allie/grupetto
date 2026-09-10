@@ -14,6 +14,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.spop.poverlay.erg.ErgMode
+import com.spop.poverlay.sim.SimulationSettings
 import com.spop.poverlay.overlay.OverlayService
 import com.spop.poverlay.releases.Release
 import com.spop.poverlay.releases.ReleaseChecker
@@ -62,6 +63,15 @@ class ConfigurationViewModel(
 
     val ergMode
         get() = configurationRepository.ergMode
+
+    val simulationSettings
+        get() = configurationRepository.simulationSettings
+
+    fun onSimulationSettingsChanged(settings: SimulationSettings) {
+        val capabilitiesChanged = settings.enabled != simulationSettings.value.enabled
+        configurationRepository.setSimulationSettings(settings)
+        if (capabilitiesChanged) syncOutboundTransports()
+    }
 
     private val bleServer = (application as GrupettoApplication).bleServer
     private val ergController = (application as GrupettoApplication).ergController

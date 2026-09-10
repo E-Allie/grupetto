@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import com.spop.poverlay.erg.ErgMode
+import com.spop.poverlay.sim.SimulationSettings
 import com.spop.poverlay.releases.Release
 import com.spop.poverlay.sensor.heartrate.HeartRateDevice
 import com.spop.poverlay.sensor.heartrate.HeartRateManager
@@ -72,6 +73,7 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
                         viewModel.ergMode.collectAsStateWithLifecycle(initialValue = ErgMode.Default)
                 val ergCapability by
                         viewModel.ergCapability.collectAsStateWithLifecycle(initialValue = null)
+                val simulationSettings by viewModel.simulationSettings.collectAsStateWithLifecycle()
                 val bleFtmsDeviceName by
                         viewModel.bleFtmsDeviceName.collectAsStateWithLifecycle(
                                 initialValue = "Grupetto FTMS"
@@ -98,6 +100,8 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
                         ergMode,
                         viewModel::onErgModeSelected,
                         ergCapability,
+                        simulationSettings,
+                        viewModel::onSimulationSettingsChanged,
                         bleFtmsDeviceName,
                         hrConnectedDevice,
                         hrDiscoveredDevices,
@@ -133,6 +137,8 @@ private fun StartServicePage(
         ergMode: ErgMode,
         onErgModeSelected: (ErgMode) -> Unit,
         ergCapability: String?,
+        simulationSettings: SimulationSettings,
+        onSimulationSettingsChanged: (SimulationSettings) -> Unit,
         bleFtmsDeviceName: String,
         hrConnectedDevice: HeartRateDevice?,
         hrDiscoveredDevices: List<HeartRateDevice>,
@@ -311,7 +317,7 @@ private fun StartServicePage(
                 Text("ERG Control", fontSize = uiScale.sp(18f), fontWeight = FontWeight.Bold, color = headingColor)
                 Spacer(modifier = Modifier.height(uiScale.dp(8f)))
                 Text(
-                        text = "Which loop holds a power target when an app sends one. " +
+                        text = "Which loop controls resistance in ERG and Simulation. " +
                                 "Auto hands it to the Bike+ controller where the firmware can take it, " +
                                 "and runs the app's own PID loop everywhere else.",
                         fontSize = uiScale.sp(13f),
@@ -338,6 +344,17 @@ private fun StartServicePage(
                         fontSize = uiScale.sp(13f),
                         color = bodyColor
                 )
+            }
+        }
+        Spacer(modifier = Modifier.height(uiScale.dp(12f)))
+
+        Card(
+                modifier = Modifier.fillMaxWidth(),
+                backgroundColor = cardColor,
+                elevation = uiScale.dp(4f)
+        ) {
+            Column(modifier = Modifier.padding(cardPadding)) {
+                SimulationSettingsCard(simulationSettings, onSimulationSettingsChanged)
             }
         }
         Spacer(modifier = Modifier.height(uiScale.dp(12f)))

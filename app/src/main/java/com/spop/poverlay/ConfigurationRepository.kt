@@ -7,6 +7,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.spop.poverlay.erg.ErgMode
+import com.spop.poverlay.sim.SimulationSettings
+import com.spop.poverlay.sim.SimulationPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 
 class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) : AutoCloseable {
@@ -34,6 +36,7 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
     private val mutableBleFtmsDeviceName = MutableStateFlow("Grupetto FTMS")
     private val mutableSerialNumber = MutableStateFlow("")
     private val mutableErgMode = MutableStateFlow(ErgMode.Default)
+    private val mutableSimulationSettings = MutableStateFlow(SimulationSettings())
 
     val showTimerWhenMinimized = mutableShowTimerWhenMinimized
     val bleTxEnabled = mutableBleTxEnabled
@@ -41,6 +44,7 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
     val bleFtmsDeviceName = mutableBleFtmsDeviceName
     val serialNumber = mutableSerialNumber
     val ergMode = mutableErgMode
+    val simulationSettings = mutableSimulationSettings
 
     private val sharedPreferences: SharedPreferences
 
@@ -114,12 +118,18 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
         }
     }
 
+    fun setSimulationSettings(settings: SimulationSettings) {
+        SimulationPreferences.write(sharedPreferences, settings)
+        mutableSimulationSettings.value = settings
+    }
+
     private fun generateSerialHex(): String {
         val value = kotlin.random.Random.nextInt(0x10000)
         return value.toString(16).padStart(4, '0').uppercase()
     }
 
     private fun updateFromSharedPrefs() {
+        mutableSimulationSettings.value = SimulationPreferences.read(sharedPreferences)
         mutableShowTimerWhenMinimized.value =
             sharedPreferences
                 .getBoolean(Preferences.ShowTimerWhenMinimized.key, true)
