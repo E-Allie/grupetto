@@ -1,7 +1,7 @@
 package com.spop.poverlay.sensor.interfaces
 
 import com.spop.poverlay.sensor.v2.TitanControl
-import com.spop.poverlay.util.calculateSpeedFromPelotonV1Power
+import com.spop.poverlay.util.calculateSpeedFromPelotonPower
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -12,7 +12,7 @@ interface SensorInterface {
     /** Unsmoothed requested brake target, for recognizing external control changes. */
     val requestedResistance: Flow<Float> get() = resistance
     val speed
-        get() = power.map(::calculateSpeedFromPelotonV1Power)
+        get() = power.map(::calculateSpeedFromPelotonPower)
 
     /**
      * Whether [setResistance] actually drives the brake on this hardware.
