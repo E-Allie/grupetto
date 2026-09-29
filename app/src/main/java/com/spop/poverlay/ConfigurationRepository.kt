@@ -6,6 +6,7 @@ import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import com.spop.poverlay.overlay.OverlayLocation
 import kotlinx.coroutines.flow.MutableStateFlow
 
 class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) : AutoCloseable {
@@ -15,6 +16,8 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
         BleTxEnabled("bleTxEnabled"),
         DirConEnabled("dirConEnabled"),
         BleFtmsDeviceName("bleFtmsDeviceName"),
+        OverlayHorizontalOffset("overlayHorizontalOffset"),
+        OverlayLocation("overlayLocation"),
         SerialNumber("serialNumber")
     }
 
@@ -95,6 +98,22 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
         mutableSerialNumber.value = normalized
         sharedPreferences.edit {
             putString(Preferences.SerialNumber.key, normalized)
+        }
+    }
+
+    val overlayHorizontalOffset: Float
+        get() = sharedPreferences.getFloat(Preferences.OverlayHorizontalOffset.key, 0f)
+            .takeIf { it.isFinite() } ?: 0f
+
+    val overlayLocation: OverlayLocation
+        get() = OverlayLocation.values().firstOrNull {
+            it.name == sharedPreferences.getString(Preferences.OverlayLocation.key, null)
+        } ?: OverlayLocation.Bottom
+
+    fun setOverlayPosition(horizontalOffset: Float, location: OverlayLocation) {
+        sharedPreferences.edit {
+            putFloat(Preferences.OverlayHorizontalOffset.key, horizontalOffset)
+            putString(Preferences.OverlayLocation.key, location.name)
         }
     }
 

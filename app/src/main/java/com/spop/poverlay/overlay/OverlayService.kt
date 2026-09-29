@@ -187,9 +187,10 @@ class OverlayService : LifecycleEnabledService() {
             EmulatorSensorInterface
         }
 
+        val configurationRepository = ConfigurationRepository(applicationContext, this)
         val timerViewModel = OverlayTimerViewModel(
             application,
-            ConfigurationRepository(applicationContext, this),
+            configurationRepository,
             sensorInterface.power
         )
 
@@ -203,7 +204,12 @@ class OverlayService : LifecycleEnabledService() {
         // Wire up timer to auto-start/pause based on movement
         timerViewModel.observeMovement(sensorViewModel.isMoving, sensorViewModel.sessionReset)
 
-        val dialogViewModel = OverlayDialogViewModel(screenSize, sensorViewModel.isMinimized)
+        val dialogViewModel = OverlayDialogViewModel(
+            screenSize,
+            sensorViewModel.isMinimized,
+            configurationRepository.overlayHorizontalOffset,
+            configurationRepository.overlayLocation
+        )
 
         // Initialize and start watchdog (always enabled)
         val watchdogThreshold = 30.minutes
@@ -275,7 +281,13 @@ class OverlayService : LifecycleEnabledService() {
                     dialogViewModel::processVerticalDrag,
                     dialogViewModel::processHideProgress,
                     dialogViewModel::onOverlayLayout,
-                    dialogViewModel::onTimerOverlayLayout
+                    dialogViewModel::onTimerOverlayLayout,
+                    onDragFinished = {
+                        configurationRepository.setOverlayPosition(
+                            dialogViewModel.dialogOrigin.value.x,
+                            dialogViewModel.dialogLocation.value
+                        )
+                    }
                 )
             }
             alpha = 0.9f

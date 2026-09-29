@@ -5,7 +5,6 @@ import android.view.WindowManager.LayoutParams
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.IntSize
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
@@ -14,7 +13,9 @@ import kotlin.math.ceil
 @Suppress("LiftReturnOrAssignment")
 class OverlayDialogViewModel(
     private val screenSize: Size,
-    private val isMinimized : StateFlow<Boolean>
+    private val isMinimized : StateFlow<Boolean>,
+    initialHorizontalOffset: Float = 0f,
+    initialLocation: OverlayLocation = OverlayLocation.Bottom
     ) {
     companion object {
         // If the overlay is dragged within this range of pixels from the center of the screen
@@ -22,13 +23,14 @@ class OverlayDialogViewModel(
         private val HorizontalDragSnapRange = -20f..20f
     }
 
-    val dialogOrigin = MutableStateFlow(Offset.Zero)
+    val dialogOrigin = MutableStateFlow(Offset(initialHorizontalOffset, 0f))
+    private var horizontalDragOffset = initialHorizontalOffset
     // Defined as width to height
     val dialogSizeParams = MutableStateFlow(LayoutParams.WRAP_CONTENT to LayoutParams.WRAP_CONTENT)
     val minimizedDialogSizeParams = MutableStateFlow(LayoutParams.WRAP_CONTENT to LayoutParams.WRAP_CONTENT)
     val partialOverlayFlags = MutableStateFlow(0)
     val touchTargetVisiblity = MutableStateFlow(View.GONE)
-    val dialogLocation = MutableStateFlow(OverlayLocation.Bottom)
+    val dialogLocation = MutableStateFlow(initialLocation)
     val dialogGravity = MutableStateFlow(dialogLocation.value.gravity)
 
 
@@ -58,42 +60,35 @@ class OverlayDialogViewModel(
         }
     }
 
-    // Takes the current horizontal progress of a drag and returns a new progress
+    // Accumulate horizontal drag deltas from the restored position.
     // - If the gesture is near the center of the screen, keep view at 0 (allows snapping to center)
     // - If the gesture is on screen, move the view to follow the gesture
     // - If the gesture would move the view offscreen, clamp it to screen bounds
-    fun processHorizontalDrag(distance: Float): Float {
-        when {
-            HorizontalDragSnapRange.contains(distance) -> {
-                // View is near the center of the screen, snap to center
-                updateOrigin(dialogOrigin, x = 0f)
-                return distance
-            }
-            horizontalDragScreenRange.contains(distance) -> {
-                // View fits on screen despite drag
-                updateOrigin(dialogOrigin, x = distance)
-                return distance
-            }
-            else -> {
-                // View would go off screen, clamp drag gesture
-                val clampedX = distance.coerceIn(horizontalDragScreenRange)
-                updateOrigin(dialogOrigin, x = clampedX)
-                return clampedX
-            }
-        }
+    fun processHorizontalDrag(delta: Float) {
+        horizontalDragOffset = (horizontalDragOffset + delta).coerceIn(horizontalDragScreenRange)
+        val x = if (horizontalDragOffset in HorizontalDragSnapRange) 0f else horizontalDragOffset
+        updateOrigin(dialogOrigin, x = x)
     }
     fun onOverlayLayout(size : IntSize){
-        horizontalDragScreenRange = calculateHorizontalDragScreenRange(size.width)
         val (_, currentHeight) = dialogSizeParams.value
         dialogSizeParams.value = size.width to currentHeight
+        updateHorizontalDragScreenRange()
     }
 
     fun onTimerOverlayLayout(size : IntSize){
-        horizontalDragScreenRange = calculateHorizontalDragScreenRange(size.width)
         val (_, currentHeight) = dialogSizeParams.value
         minimizedDialogSizeParams.value = size.width to currentHeight
+        updateHorizontalDragScreenRange()
     }
     private var horizontalDragScreenRange = calculateHorizontalDragScreenRange(0)
+
+    private fun updateHorizontalDragScreenRange() {
+        val width = maxOf(dialogSizeParams.value.first, minimizedDialogSizeParams.value.first, 0)
+        horizontalDragScreenRange = calculateHorizontalDragScreenRange(width)
+        horizontalDragOffset = horizontalDragOffset.coerceIn(horizontalDragScreenRange)
+        // Keep a restored position reachable if the display or overlay size has changed.
+        updateOrigin(dialogOrigin, x = dialogOrigin.value.x.coerceIn(horizontalDragScreenRange))
+    }
 
     // Takes the current vertical progress of a drag and returns a new progress
     // - Reset the progress to 0 and move the view once drag is halfway across screen
@@ -119,7 +114,7 @@ class OverlayDialogViewModel(
 
 
     private fun calculateHorizontalDragScreenRange(overlayWidthPx : Int): ClosedFloatingPointRange<Float> {
-        val dragRange = abs(ceil((screenSize.width - overlayWidthPx) / 2f).toInt())
+        val dragRange = ceil((screenSize.width - overlayWidthPx) / 2f).toInt().coerceAtLeast(0)
         return -dragRange.toFloat()..dragRange.toFloat()
     }
 

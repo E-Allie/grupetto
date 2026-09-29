@@ -51,11 +51,12 @@ fun Overlay(
     timerViewModel: OverlayTimerViewModel,
     height: Dp,
     locationState: State<OverlayLocation>,
-    horizontalDragCallback: (Float) -> Float,
+    horizontalDragCallback: (Float) -> Unit,
     verticalDragCallback: (Float) -> Float,
     offsetCallback: (Float, Float) -> Unit,
     onLayout: (IntSize) -> Unit,
-    onTimerLayout: (IntSize) -> Unit
+    onTimerLayout: (IntSize) -> Unit,
+    onDragFinished: () -> Unit
 ) {
     val power by sensorViewModel.powerValue.collectAsState(initial = SensorValuePlaceholderText)
 
@@ -137,7 +138,6 @@ fun Overlay(
 
     offsetCallback(visibilityOffset.y.toFloat(), size.value.height.toFloat())
 
-    var horizontalDragOffset by remember { mutableStateOf(0f) }
     var verticalDragOffset by remember { mutableStateOf(0f) }
 
     val backgroundShape = when (location) {
@@ -192,13 +192,16 @@ fun Overlay(
             )
             .pointerInput(Unit) {
                 detectDragGestures(onDrag = { _, offset ->
-                    horizontalDragOffset += offset.x
-                    horizontalDragOffset = horizontalDragCallback(horizontalDragOffset)
+                    horizontalDragCallback(offset.x)
 
                     verticalDragOffset += offset.y
                     verticalDragOffset = verticalDragCallback(verticalDragOffset)
                 }, onDragEnd = {
                     verticalDragOffset = 0f
+                    onDragFinished()
+                }, onDragCancel = {
+                    verticalDragOffset = 0f
+                    onDragFinished()
                 })
             }) {
 
