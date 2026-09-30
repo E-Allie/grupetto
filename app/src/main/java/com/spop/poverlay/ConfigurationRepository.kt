@@ -9,6 +9,7 @@ import androidx.lifecycle.LifecycleOwner
 import com.spop.poverlay.erg.ErgMode
 import com.spop.poverlay.sim.SimulationSettings
 import com.spop.poverlay.sim.SimulationPreferences
+import com.spop.poverlay.overlay.OverlayLocation
 import kotlinx.coroutines.flow.MutableStateFlow
 
 class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) : AutoCloseable {
@@ -18,6 +19,8 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
         BleTxEnabled("bleTxEnabled"),
         DirConEnabled("dirConEnabled"),
         BleFtmsDeviceName("bleFtmsDeviceName"),
+        OverlayHorizontalOffset("overlayHorizontalOffset"),
+        OverlayLocation("overlayLocation"),
         SerialNumber("serialNumber"),
         ErgControl("ergMode")
     }
@@ -121,6 +124,22 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner) 
     fun setSimulationSettings(settings: SimulationSettings) {
         SimulationPreferences.write(sharedPreferences, settings)
         mutableSimulationSettings.value = settings
+    }
+
+    val overlayHorizontalOffset: Float
+        get() = sharedPreferences.getFloat(Preferences.OverlayHorizontalOffset.key, 0f)
+            .takeIf { it.isFinite() } ?: 0f
+
+    val overlayLocation: OverlayLocation
+        get() = OverlayLocation.values().firstOrNull {
+            it.name == sharedPreferences.getString(Preferences.OverlayLocation.key, null)
+        } ?: OverlayLocation.Bottom
+
+    fun setOverlayPosition(horizontalOffset: Float, location: OverlayLocation) {
+        sharedPreferences.edit {
+            putFloat(Preferences.OverlayHorizontalOffset.key, horizontalOffset)
+            putString(Preferences.OverlayLocation.key, location.name)
+        }
     }
 
     private fun generateSerialHex(): String {
