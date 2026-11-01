@@ -12,6 +12,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
+import com.spop.poverlay.erg.ErgMode
+import com.spop.poverlay.sim.SimulationSettings
 import com.spop.poverlay.overlay.OverlayService
 import com.spop.poverlay.releases.Release
 import com.spop.poverlay.releases.ReleaseChecker
@@ -66,6 +68,8 @@ class ConfigurationViewModel(
         get() = configurationRepository.showTimerWhenMinimized
 
     val showShifters get() = configurationRepository.showShifters
+    val showTrainerStatus get() = configurationRepository.showTrainerStatus
+    fun setShowTrainerStatus(shown: Boolean) = configurationRepository.setShowTrainerStatus(shown)
     val shifterInset get() = configurationRepository.shifterInset
     fun setShowShifters(shown: Boolean) = configurationRepository.setShowShifters(shown)
     fun setShifterInset(inset: Float) = configurationRepository.setShifterInset(inset)
@@ -114,20 +118,39 @@ class ConfigurationViewModel(
     fun forgetPowerMeter(address: String) { powerMeters.forget(address) }
     val bikeControlState = bikeControl?.state ?: MutableStateFlow(com.spop.poverlay.control.ControlState())
 
-    fun setBikeTuning(shiftSize: Int, gain: Float, wattsPerShift: Int, inclineSensitivity: Float) {
-        bikeControl?.tune(shiftSize, gain, wattsPerShift, inclineSensitivity)
+    fun setBikeTuning(shiftSize: Int, gain: Float, wattsPerShift: Int) {
+        bikeControl?.tune(shiftSize, gain, wattsPerShift)
         if (isPreview) return
         bikeControl?.state?.value?.let { state ->
             getApplication<Application>().getSharedPreferences(ConfigurationRepository.SharedPrefsName, Context.MODE_PRIVATE)
                 .edit().putInt("bikeShiftSize", state.shiftSize).putFloat("bikeProportionalGain", state.gain)
-                .putInt("bikeWattsPerShift", state.wattsPerShift).putFloat("bikeInclineSensitivity", state.inclineSensitivity).apply()
+                .putInt("bikeWattsPerShift", state.wattsPerShift).apply()
         }
     }
+    val simulationSettings get() = configurationRepository.simulationSettings
+
+    fun setErgMode(mode: ErgMode) {
+        if (!isPreview) configurationRepository.setErgMode(mode)
+        bikeControl?.setErgMode(mode)
+    }
+
+    fun setSimulationSettings(settings: SimulationSettings) {
+        if (!isPreview) configurationRepository.setSimulationSettings(settings)
+        bikeControl?.setSimulationSettings(settings)
+    }
+
+    fun shiftBike(direction: Int) { bikeControl?.shift(direction) }
+    fun resumeBikeControl() {
+        if (bikeControl?.resumeLocally() != true)
+            infoPopup.value = bikeControl?.state?.value?.message ?: "Waiting for fresh bike data."
+    }
+    fun pauseBikeControl() { bikeControl?.pauseLocally() }
+
     fun startErg(watts: Int) {
-        if (bikeControl?.localErg(watts) != true) infoPopup.value = "Waiting for fresh Bike+ / CrossTrainer data."
+        if (bikeControl?.localErg(watts) != true) infoPopup.value = bikeControl?.state?.value?.message ?: "Waiting for fresh bike data."
     }
     fun startSimulation(incline: Float) {
-        if (bikeControl?.localSimulation(incline) != true) infoPopup.value = "Waiting for fresh Bike+ / CrossTrainer data."
+        if (bikeControl?.localSimulation(incline) != true) infoPopup.value = bikeControl?.state?.value?.message ?: "Enable terrain resistance in SIM settings and wait for fresh bike data."
     }
     fun setBikeResistance(resistance: Int) { bikeControl?.localResistance(resistance) }
     fun stopBikeControl() { bikeControl?.localManual() }
@@ -244,7 +267,7 @@ class ConfigurationViewModel(
             bleServer.setDirConTransportEnabled(dirConEnabled.value)
             bleServer.start()
         } else {
-            bleServer.stop()
+            bleServer.stopBluetoothTransport()
             bleServer.setDirConTransportEnabled(dirConEnabled.value)
         }
     }

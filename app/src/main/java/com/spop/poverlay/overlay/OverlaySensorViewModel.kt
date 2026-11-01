@@ -85,6 +85,8 @@ class OverlaySensorViewModel(
     val bikeControlState = sensorInterface.bikeControl?.state
         ?: MutableStateFlow(com.spop.poverlay.control.ControlState())
     fun shift(direction: Int) { sensorInterface.bikeControl?.shift(direction) }
+    fun resumeTrainerControl() { sensorInterface.bikeControl?.resumeLocally() }
+    fun stopTrainerControl() { sensorInterface.bikeControl?.pauseLocally() }
 
     companion object {
         // The sensor does not necessarily return new value this quickly

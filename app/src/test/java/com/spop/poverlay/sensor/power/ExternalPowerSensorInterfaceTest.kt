@@ -8,8 +8,10 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.After
 
 class ExternalPowerSensorInterfaceTest {
+    @After fun closeController() { bike.bikeControl.close() }
     private var now = 1000L
     private val bike = object : SensorInterface {
         override val power = MutableStateFlow(145f)
@@ -77,6 +79,14 @@ class ExternalPowerSensorInterfaceTest {
         bike.bikeControl.acceptSample(BikeSample(145f, 80f, 40, now))
         assertTrue(bike.bikeControl.localErg(200))
         readings.value = ExternalPowerReading(210, now, "meter")
-        assertEquals(ControlMode.Manual, sensor.bikeControl!!.state.first { it.mode == ControlMode.Manual }.mode)
+        val stopped = sensor.bikeControl!!.state.first { it.suspended }
+        assertEquals(ControlMode.Erg, stopped.mode)
+        assertEquals(200, stopped.targetWatts)
+        assertTrue(stopped.paused)
+        assertTrue(stopped.externalPowerActive)
+        assertFalse(sensor.bikeControl!!.localErg(225))
+        assertTrue(sensor.bikeControl!!.resumeLocally())
+        assertFalse(sensor.bikeControl!!.state.value.suspended)
+        assertEquals(com.spop.poverlay.erg.ErgPath.Host, sensor.bikeControl!!.state.value.ergPath)
     }
 }

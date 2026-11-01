@@ -35,6 +35,7 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
     val release by viewModel.latestRelease
     val boot by viewModel.autoStartOnBoot.collectAsStateWithLifecycle()
     val timer by viewModel.showTimerWhenMinimized.collectAsStateWithLifecycle()
+    val trainerStatus by viewModel.showTrainerStatus.collectAsStateWithLifecycle()
     val ble by viewModel.bleTxEnabled.collectAsStateWithLifecycle()
     val dircon by viewModel.dirConEnabled.collectAsStateWithLifecycle()
     val ant by viewModel.antPlusTxEnabled.collectAsStateWithLifecycle()
@@ -101,6 +102,9 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
                     SettingsTile(if (running) "Overlay · Running" else "Overlay · Ready", Modifier.weight(1f).fillMaxHeight(), Color(0xFF34D399)) {
                         SettingSwitch("Start on boot", boot, viewModel::onAutoStartOnBootClicked)
                         SettingSwitch("Timer when minimized", timer, viewModel::onShowTimerWhenMinimizedClicked)
+                        if (!viewModel.isTread) {
+                            SettingSwitch("Trainer controls in overlay", trainerStatus, viewModel::setShowTrainerStatus)
+                        }
                     }
                     SettingsTile("Broadcast connections", Modifier.weight(1f).fillMaxHeight(), Color(0xFF60A5FA)) {
                         ConnectionSummary("Bluetooth", if (viewModel.isPreview) "Preview" else if (ble) "On · Grupetto" else "Off", ble)
@@ -122,29 +126,24 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
                     if (bike.connected) {
                         SettingsTile("Trainer control", Modifier.weight(1f).fillMaxHeight(), Color(0xFFFBBF24)) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text(when (bike.mode) {
-                                    com.spop.poverlay.control.ControlMode.Erg -> "ERG · ${bike.targetWatts} W"
-                                    com.spop.poverlay.control.ControlMode.Simulation -> "Sim · ${"%.1f".format(java.util.Locale.US, bike.targetIncline)}%"
-                                    else -> "Manual · ${bike.targetResistance}"
-                                }, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF6EE7B7))
-                                Spacer(Modifier.weight(1f))
-                                Text(if (externalWatts != null) "EXTERNAL POWER" else "BUILT-IN POWER", fontSize = 10.sp, color = Color(0xFF9EAEC0))
+                                Text(trainerTargetSummary(bike), fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF6EE7B7), modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(if (bike.externalPowerActive) "EXTERNAL POWER" else "BUILT-IN POWER", fontSize = 10.sp, color = Color(0xFF9EAEC0))
                             }
                             Text(when (bike.mode) {
-                                com.spop.poverlay.control.ControlMode.Erg -> "Shift ${bike.wattsPerShift} W   ·   Gain ${"%.3f".format(java.util.Locale.US, bike.gain)}"
-                                com.spop.poverlay.control.ControlMode.Simulation -> "Shift ${bike.shiftSize} pts   ·   ${"%.1f".format(java.util.Locale.US, bike.inclineSensitivity)} pts / 1% incline"
-                                else -> "Shift ${bike.shiftSize} pts"
-                            },
-                                fontSize = 13.sp, lineHeight = 17.sp, color = Color(0xFF9EAEC0))
+                                com.spop.poverlay.control.ControlMode.Erg -> "${ergPathLabel(bike.ergPath)} · Shift ${bike.wattsPerShift} W"
+                                com.spop.poverlay.control.ControlMode.Simulation -> simulationStatus(bike)
+                                else -> "Shift ${bike.shiftSize} resistance points"
+                            }, fontSize = 13.sp, lineHeight = 17.sp, color = Color(0xFF9EAEC0), maxLines = 2)
                             Text(bike.message, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Spacer(Modifier.weight(1f))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 TileActionButton("Modes & tuning", { dialog = "bike" }, Modifier.weight(1f))
-                                OutlinedButton(viewModel::stopBikeControl, modifier = Modifier.height(48.dp),
+                                OutlinedButton(if (controlNeedsResume(bike)) viewModel::resumeBikeControl else viewModel::pauseBikeControl, modifier = Modifier.height(48.dp),
                                     shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
                                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF52728F)),
                                     colors = ButtonDefaults.outlinedButtonColors(backgroundColor = Color.Transparent, contentColor = Color(0xFFE6F3FF))) {
-                                    Text("Manual", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(if (controlNeedsResume(bike)) "Resume" else "Stop control", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
                         }
@@ -182,7 +181,7 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
             SensorSummary("Power meter", meter?.let { it.name ?: it.address } ?: "Use an external Cycling Power sensor",
                 externalWatts?.let { "${it.watts.coerceAtLeast(0)} W" } ?: "—", Color(0xFFFBBF24))
             OutlinedButton({ dialog = "power" }, Modifier.fillMaxWidth()) { Text("Pair & manage power meters") }
-            Text("External watts are used for display, broadcasting, and ERG. Changing or losing the source stops ERG until restarted.",
+            Text("External watts are used for display, broadcasting, and software ERG/SIM. Changing or losing the source stops control until you tap Resume.",
                 fontSize = 13.sp, color = Color(0xFF9EAEC0))
         }
         "power" -> PowerMeterDialog(viewModel) { dialog = null }
@@ -214,13 +213,19 @@ fun ConfigurationPage(viewModel: ConfigurationViewModel) {
             var tab by remember { mutableStateOf(0) }
             TabRow(tab, backgroundColor = Color.Transparent) {
                 Tab(tab == 0, { tab = 0 }, text = { Text("Trainer") })
-                Tab(tab == 1, { tab = 1 }, text = { Text("Shifters") })
+                Tab(tab == 1, { tab = 1 }, text = { Text("SIM settings") })
+                Tab(tab == 2, { tab = 2 }, text = { Text("Shifters") })
             }
             Spacer(Modifier.height(8.dp))
-            if (tab == 0) TrainerControls(bike, viewModel::startErg, viewModel::startSimulation,
-                viewModel::stopBikeControl, viewModel::setBikeResistance, viewModel::setBikeTuning)
-            else ShifterSettings(showShifters, shifterInset, viewModel::setShowShifters, viewModel::setShifterInset,
-                onPreview = { previewShifters = it })
+            when (tab) {
+                0 -> TrainerControls(bike, viewModel::startErg, viewModel::startSimulation,
+                    viewModel::stopBikeControl, viewModel::setBikeResistance, viewModel::setBikeTuning,
+                    viewModel::setErgMode, viewModel::shiftBike, viewModel::resumeBikeControl,
+                    viewModel::pauseBikeControl, onSimulationSettings = { tab = 1 })
+                1 -> SimulationSettingsCard(bike.simulationSettings, viewModel::setSimulationSettings)
+                else -> ShifterSettings(showShifters, shifterInset, viewModel::setShowShifters, viewModel::setShifterInset,
+                    onPreview = { previewShifters = it })
+            }
         }
         "heart" -> HeartRateManagerDialog(hr, discovered, saved, scanning, match,
             viewModel::startHeartRateDiscovery, viewModel::stopHeartRateDiscovery,
@@ -359,7 +364,7 @@ private fun PowerMeterDialog(viewModel: ConfigurationViewModel, onDismiss: () ->
             Text("${current + 1} / $pages", Modifier.padding(top = 12.dp), fontSize = 13.sp)
             TextButton({ page = current + 1 }, enabled = current + 1 < pages) { Text("Next") }
         }
-        Text("A connected meter supplies watts to the overlay, all broadcasts, and ERG. Cadence and resistance still come from the bike.",
+        Text("A connected meter supplies watts to the overlay, all broadcasts, and software ERG/SIM. Cadence and resistance still come from the bike. Your preferred ERG controller is retained when the meter disconnects.",
             fontSize = 12.sp, color = Color(0xFF9EAEC0))
     }
 }

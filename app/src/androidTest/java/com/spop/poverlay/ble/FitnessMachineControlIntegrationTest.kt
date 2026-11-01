@@ -18,6 +18,7 @@ class FitnessMachineControlIntegrationTest {
     private fun fixture(type: DeviceType, controllable: Boolean, block: (FitnessMachineService, BikeControl) -> Unit) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val control = BikeControl(controllable, { 1000L }) { true }
+        control.setSimulationSettings(com.spop.poverlay.sim.SimulationSettings(enabled = true))
         control.acceptSample(BikeSample(100f, 80f, 40, 1000))
         val sensor = object : SensorInterface {
             override val deviceType = type
@@ -27,17 +28,30 @@ class FitnessMachineControlIntegrationTest {
         }
         val server = BleServer(context, context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager, sensor)
         try { block(FitnessMachineService(server, type, control), control) }
-        finally { server.coroutineContext.cancel() }
+        finally { control.close(); server.coroutineContext.cancel() }
     }
 
     @Test fun controllableBikeAdvertisesExactlyImplementedTargetsAndRanges() = fixture(DeviceType.Bike, true) { ftms, _ ->
         val features = ftms.service.getCharacteristic(FitnessMachineConstants.FeatureUUID).value
         assertArrayEquals(byteArrayOf(12, 32, 0, 0), features.copyOfRange(4, 8))
-        assertArrayEquals(byteArrayOf(25, 0, 232.toByte(), 3, 1, 0),
+        assertArrayEquals(byteArrayOf(25, 0, 32, 3, 1, 0),
             ftms.service.getCharacteristic(FitnessMachineConstants.SupportedPowerRangeUUID).value)
         assertArrayEquals(byteArrayOf(0, 0, 232.toByte(), 3, 10, 0),
             ftms.service.getCharacteristic(FitnessMachineConstants.SupportedResistanceRangeUUID).value)
         assertNotNull(ftms.service.getCharacteristic(FitnessMachineConstants.MachineStatusUUID))
+    }
+
+    @Test fun simulationFeatureTracksTheOptInSetting() = fixture(DeviceType.Bike, true) { ftms, control ->
+        control.setSimulationSettings(com.spop.poverlay.sim.SimulationSettings(enabled = false))
+        ftms.onControlStateChanged(control.state.value)
+        assertArrayEquals(byteArrayOf(12, 0, 0, 0),
+            ftms.service.getCharacteristic(FitnessMachineConstants.FeatureUUID).value.copyOfRange(4, 8))
+        assertEquals(1, ftms.handleControl("dircon:test", byteArrayOf(0))[2].toInt())
+        assertEquals(2, ftms.handleControl("dircon:test", byteArrayOf(17, 0, 0, 0, 0, 40, 51))[2].toInt())
+        control.setSimulationSettings(com.spop.poverlay.sim.SimulationSettings(enabled = true))
+        ftms.onControlStateChanged(control.state.value)
+        assertArrayEquals(byteArrayOf(12, 32, 0, 0),
+            ftms.service.getCharacteristic(FitnessMachineConstants.FeatureUUID).value.copyOfRange(4, 8))
     }
     @Test fun originalBikeAndTreadHaveNoMotorCapabilities() {
         listOf(DeviceType.Bike, DeviceType.Tread).forEach { type ->

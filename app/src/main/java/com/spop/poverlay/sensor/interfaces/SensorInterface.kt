@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.map
 enum class DeviceType { Bike, Tread }
 
 interface SensorInterface {
+    /** Available only on a supported Bike+; other sensors cannot use native ERG. */
+    val titanControl: com.spop.poverlay.sensor.v2.TitanControl? get() = null
     val bikeControl: com.spop.poverlay.control.BikeControl? get() = null
     val power: Flow<Float>
     /** Native watts remain available for comparison when an external meter supplies [power]. */

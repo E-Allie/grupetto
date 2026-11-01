@@ -150,4 +150,23 @@ class OverlayPositionTest {
             assertEquals(0f, config.shifterInset.value, 0f)
         }
     }
+    @Test fun `controller choice and complete SIM settings survive recreation`() {
+        val settings = com.spop.poverlay.sim.SimulationSettings(
+            riderMassKg = 83.5, bicycleMassKg = 9.2,
+            massUnit = com.spop.poverlay.sim.MassUnit.Pounds,
+            enabled = true, gearing = com.spop.poverlay.sim.GearProfile.Road,
+            maxSimWatts = 175, autoResumeAfterPause = true)
+        repository().use { config ->
+            assertEquals(com.spop.poverlay.erg.ErgMode.Auto, config.ergMode.value)
+            assertEquals(false, config.simulationSettings.value.enabled)
+            assertEquals(140, config.simulationSettings.value.maxSimWatts)
+            config.setErgMode(com.spop.poverlay.erg.ErgMode.Host)
+            config.setSimulationSettings(settings)
+        }
+        repository().use { config ->
+            assertEquals(com.spop.poverlay.erg.ErgMode.Host, config.ergMode.value)
+            assertEquals(settings, config.simulationSettings.value)
+        }
+    }
+
 }

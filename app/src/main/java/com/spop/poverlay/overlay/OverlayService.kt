@@ -275,7 +275,8 @@ class OverlayService : LifecycleEnabledService() {
                             dialogViewModel.dialogOrigin.value.x,
                             dialogViewModel.dialogLocation.value
                         )
-                    }
+                    },
+                    trainerStatusVisible = configurationRepository.showTrainerStatus.collectAsState().value,
                 )
             }
             alpha = 1f
@@ -296,7 +297,7 @@ class OverlayService : LifecycleEnabledService() {
                     combine(sensorViewModel.bikeControlState, configurationRepository.showShifters,
                         configurationRepository.shifterInset, configurationVisible) { control, enabled, inset, configuring ->
                         shifterWindows?.update(showRideShifters(control.connected, enabled, configuring), inset,
-                            control.mode == com.spop.poverlay.control.ControlMode.Erg)
+                            control.mode)
                     }.collect {}
                 }
             }
@@ -471,7 +472,7 @@ class OverlayService : LifecycleEnabledService() {
             bleServer.setDirConTransportEnabled(dirConEnabled)
             bleServer.start()
         } else {
-            bleServer.stop()
+            bleServer.stopBluetoothTransport()
             bleServer.setDirConTransportEnabled(dirConEnabled)
         }
 

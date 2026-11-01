@@ -20,12 +20,30 @@ class FitnessMachineService(
 
     fun onControlStateChanged(state: com.spop.poverlay.control.ControlState) {
         if (!canControl) return
+        updateTargetFeatures()
         if (lastPermissionLostCount != state.permissionLostCount) {
-            machineStatusCharacteristic.value = byteArrayOf(0xff.toByte())
-            server.notifyDirConCharacteristicChanged(machineStatusCharacteristic)
-            connectedDevices.toList().forEach { server.notifyCharacteristicChanged(it, machineStatusCharacteristic, false) }
+            notifyPermissionLost(state.permissionLostClient)
         }
         lastPermissionLostCount = state.permissionLostCount
+    }
+
+    private fun targetFlags(): Int = if (canControl) (1 shl 2) or (1 shl 3) or
+        (if (control!!.supportsSimulation) 1 shl 13 else 0) else 0
+
+    private fun updateTargetFeatures() {
+        val bytes = featureCharacteristic.value?.copyOf() ?: return
+        val flags = targetFlags()
+        for (index in 0..3) bytes[index + 4] = (flags shr (index * 8)).toByte()
+        featureCharacteristic.value = bytes
+    }
+
+    private fun notifyPermissionLost(client: String?) {
+        if (client == null) return
+        machineStatusCharacteristic.value = byteArrayOf(0xff.toByte())
+        if (client.startsWith("dircon:")) server.notifyDirConCharacteristicChanged(machineStatusCharacteristic, client)
+        else connectedDevices.toList().filter { "ble:${it.address}" == client }.forEach {
+            server.notifyCharacteristicChanged(it, machineStatusCharacteristic, false)
+        }
     }
 
     private val indoorBikeDataCharacteristic = BluetoothGattCharacteristic(
@@ -71,8 +89,7 @@ class FitnessMachineService(
             FitnessMachineConstants.FeatureFlags.ResistanceLevelSupported
         }
 
-    // No control supported -> all target flags 0
-    val targetFlags = if (canControl) (1 shl 2) or (1 shl 3) or (1 shl 13) else 0
+        val targetFlags = targetFlags()
 
         val payload = byteArrayOf(
             // Feature flags (uint32 LE)
@@ -135,14 +152,17 @@ class FitnessMachineService(
     private val powerRangeCharacteristic = BluetoothGattCharacteristic(
         FitnessMachineConstants.SupportedPowerRangeUUID, BluetoothGattCharacteristic.PROPERTY_READ,
         BluetoothGattCharacteristic.PERMISSION_READ
-    ).apply { value = byteArrayOf(25, 0, 0xe8.toByte(), 3, 1, 0) }
+    ).apply { value = byteArrayOf(25, 0, 0x20, 3, 1, 0) } // Common native/software range: 25..800 W.
 
     fun handleControl(client: String, value: ByteArray): ByteArray = synchronized(server) {
         val opcode = value.firstOrNull()?.toInt()?.and(255) ?: 0
+        val previousOwner = control?.state?.value?.owner
         val reply = if (canControl) control!!.procedure(client, value)
         else com.spop.poverlay.control.BikeControl.Reply(
             if (value.size == 1 && opcode in listOf(0, 1, 7) ||
                 value.size == 2 && opcode == 8 && value[1].toInt() in 1..2) 1 else 2)
+        if (reply.result == 1 && opcode == 0 && previousOwner != null && previousOwner != client)
+            notifyPermissionLost(previousOwner)
         reply.status?.let { status ->
             machineStatusCharacteristic.value = status
             server.notifyDirConCharacteristicChanged(machineStatusCharacteristic)

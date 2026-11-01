@@ -74,10 +74,13 @@ fun Overlay(
     offsetCallback: (Float, Float) -> Unit,
     onLayout: (IntSize) -> Unit,
     onTimerLayout: (IntSize) -> Unit,
-    onDragFinished: () -> Unit
+    onDragFinished: () -> Unit,
+    trainerStatusVisible: Boolean = false,
 ) {
     val power by sensorViewModel.powerValue.collectAsState(initial = SensorValuePlaceholderText)
     val pelotonPowerComparison by sensorViewModel.pelotonPowerComparison.collectAsState(initial = null)
+    val trainerState by sensorViewModel.bikeControlState.collectAsState()
+    val showTrainer = trainerStatusVisible && showTrainerStatus(trainerState)
 
     val defaultMetric by sensorViewModel.defaultMetric.collectAsState()
     val selectedMetric by sensorViewModel.selectedMetric.collectAsState(initial = defaultMetric)
@@ -155,7 +158,8 @@ fun Overlay(
     val size = remember { mutableStateOf(IntSize.Zero) }
 
 
-    val contentHeight = height + if (pelotonPowerComparison != null) 14.dp else 0.dp
+    val metricContentHeight = height + if (pelotonPowerComparison != null) 14.dp else 0.dp
+    val contentHeight = metricContentHeight + if (showTrainer) TrainerStatusHeight else 0.dp
     val mainContentHeight = with(LocalDensity.current) {
         contentHeight.roundToPx()
     }
@@ -265,7 +269,8 @@ fun Overlay(
                 OverlayLocation.Bottom -> Alignment.Bottom
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(Modifier.height(metricContentHeight), verticalAlignment = Alignment.CenterVertically) {
             OverlayMainContent(
                 modifier = Modifier
                     .wrapContentWidth(unbounded = true)
@@ -311,6 +316,10 @@ fun Overlay(
                 onSpeedUnitClicked = { sensorViewModel.onClickedSpeedUnit() },
                 onChartClicked = { sensorViewModel.onOverlayPressed() }
             )
+            }
+            if (showTrainer) TrainerStatus(trainerState,
+                onResume = sensorViewModel::resumeTrainerControl,
+                onStop = sensorViewModel::stopTrainerControl)
             }
         }
     }

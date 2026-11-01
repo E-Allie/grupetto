@@ -46,7 +46,7 @@ internal fun ShifterSettings(shown: Boolean, inset: Float, onShown: (Boolean) ->
             Text("1/8 screen inward", fontSize = 12.sp)
         }
         Spacer(Modifier.height(16.dp))
-        Text("Both buttons move the same distance. ERG shifts change target watts; Sim and Manual shifts change resistance.",
+        Text("Both buttons move the same distance. ERG shifts change target watts; SIM shifts change virtual gear; Manual and Resistance shifts change resistance.",
             fontSize = 13.sp, lineHeight = 18.sp, color = Color(0xFF9EAEC0))
     }
 }

@@ -312,6 +312,23 @@ class BleNotificationFlowTest {
         every { service.service.uuid } returns FitnessMachineConstants.ServiceUUID
         @Suppress("UNCHECKED_CAST")
         (get("registeredServices") as MutableList<BaseBleService>).add(service)
+        @Suppress("UNCHECKED_CAST")
+        (get("registeredGattServiceUuids") as MutableSet<UUID>).add(FitnessMachineConstants.ServiceUUID)
+    }
+
+    @Test
+    fun `logical DIRCON services are not advertised before GATT registration succeeds`() {
+        prepareAdvertising()
+        @Suppress("UNCHECKED_CAST")
+        val registeredUuids = get("registeredGattServiceUuids") as MutableSet<UUID>
+        registeredUuids.clear()
+
+        invoke("startAdvertising")
+        verify(exactly = 0) { advertiser.startAdvertising(any(), any(), any(), any()) }
+
+        registeredUuids.add(FitnessMachineConstants.ServiceUUID)
+        invoke("startAdvertising")
+        verify(exactly = 1) { advertiser.startAdvertising(any(), any(), any(), any()) }
     }
 
     @Test

@@ -74,11 +74,15 @@ After following those steps, the APK for grupetto can be found on the Releases t
 # Usage
 
 - On a connected Bike+ or G700 CrossTrainer, **Modes & tuning** provides ERG
-  (25–1000 W), Sim, and Manual with a light selected-mode button. ERG has gain
-  and watts-per-shift controls; Sim has incline, incline sensitivity, and
-  resistance per shift; Manual has resistance and resistance per shift.
+  (25–800 W), Sim and Manual. Choose **Auto** for Peloton Auto Follow with a
+  software fallback, **Native** to require Auto Follow, or **Software** for
+  table-assisted feedback. Opt-in Sim calculates road-load power from terrain,
+  cadence, rider/bicycle mass and 24 virtual gears, with a personal watt ceiling
+  and controlled restarts. Explicit resistance commands have no app rate limit,
+  including recovery targets while stopped. Knob overrides and rider stops
+  require local **Resume control** before regulation can restart.
   Tall **− / +** shifters stay fixed at the bottom left and right in overlay
-  mode, changing target watts in ERG and resistance in Sim/Manual. The
+  mode, changing target watts in ERG, virtual gear in Sim and resistance in Manual. The
   **Shifters** tab has a visibility checkbox and a shared position slider that
   moves each button inward by up to 1/8 of the screen width. Settings hide
   them except for a temporary preview while moving that slider. Bluetooth
@@ -91,10 +95,12 @@ After following those steps, the APK for grupetto can be found on the Releases t
   use pages instead of scrolling. External Sensors includes heart-rate monitors,
   HR zones, and Bluetooth Cycling Power meters; HR and power can connect together.
 - A selected external power meter supplies watts for the overlay, broadcasts,
-  and ERG. A small **Peloton … W** comparison appears below external watts in
+  and software control in both ERG and Sim, overriding the native-controller
+  selection. A small **Peloton … W** comparison appears below external watts in
   both overlay sizes. Missing data falls back to built-in power after three
-  seconds. Changing or losing the power source stops ERG until explicitly
-  restarted. Cadence, resistance, and speed remain supplied by the bike.
+  seconds. Changing or losing the power source suspends ERG or Sim until local
+  **Resume control**. Cadence and resistance remain supplied by the bike; speed
+  uses its native power and the stock Peloton formula.
 - Developer menu: tap the version label at the bottom left **five times**, with
   no more than two seconds between taps. Select Bike, Bike+, CrossTrainer, or
   Tread to restart into emulation. **Use detected hardware** restores normal

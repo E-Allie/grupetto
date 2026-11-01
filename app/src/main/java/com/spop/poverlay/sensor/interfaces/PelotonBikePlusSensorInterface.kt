@@ -2,6 +2,9 @@ package com.spop.poverlay.sensor.interfaces
 
 import android.content.Context
 import com.spop.poverlay.sensor.v2.BikePlusCombinedSensor
+import com.spop.poverlay.sensor.v2.TitanControl
+import com.spop.poverlay.sensor.v2.TitanStatusPacket
+import com.spop.poverlay.sensor.v2.TitanStatusReading
 import com.spop.poverlay.sensor.v2.getV2Binder
 import com.spop.poverlay.util.windowed
 import kotlinx.coroutines.*
@@ -27,28 +30,55 @@ class PelotonBikePlusSensorInterface(val context: Context, controlSupported: Boo
     private val job = SupervisorJob()
     override val coroutineContext: CoroutineContext = job + Dispatchers.IO
     @Volatile private var activeSensor: BikePlusCombinedSensor? = null
+    private val currentSensor: BikePlusCombinedSensor?
+        get() = activeSensor?.takeIf { job.isActive }
+
+    /** Stable handle whose commands always resolve the currently bound sensor. */
+    override val titanControl: TitanControl? = if (!controlSupported) null else object : TitanControl {
+        override val status: Flow<TitanStatusPacket>
+            get() = combinedSensorState.flatMapLatest { it.status }
+        override val latestStatusReading: TitanStatusReading?
+            get() = currentSensor?.latestStatusReading
+        override fun setPowerZoneAutoFollow(watts: Int): Boolean =
+            currentSensor?.setPowerZoneAutoFollow(watts) == true
+        override fun disablePowerZoneAutoFollow(): Boolean =
+            currentSensor?.disablePowerZoneAutoFollow() == true
+        override fun setPzafRampUpRate(rate: Int): Boolean = currentSensor?.setPzafRampUpRate(rate) == true
+        override fun setPzafRampDownRate(rate: Int): Boolean = currentSensor?.setPzafRampDownRate(rate) == true
+        override fun setPzafMaxResistance(percent: Int): Boolean = currentSensor?.setPzafMaxResistance(percent) == true
+        override fun setPzafMinUpdateRpm(rpm: Int): Boolean = currentSensor?.setPzafMinUpdateRpm(rpm) == true
+    }
+
     override val bikeControl = com.spop.poverlay.control.BikeControl(
-        controlSupported, android.os.SystemClock::elapsedRealtime
-    ) { activeSensor?.setResistance(it) == true }
+        supported = controlSupported,
+        clock = android.os.SystemClock::elapsedRealtime,
+        writeResistance = { currentSensor?.setResistance(it) == true },
+        nativeControl = titanControl,
+        scope = this
+    )
 
     init {
         if (controlSupported) {
             val preferences = context.getSharedPreferences(com.spop.poverlay.ConfigurationRepository.SharedPrefsName, Context.MODE_PRIVATE)
             bikeControl.tune(preferences.getInt("bikeShiftSize", 2), preferences.getFloat("bikeProportionalGain", .007f),
-                preferences.getInt("bikeWattsPerShift", 10), preferences.getFloat("bikeInclineSensitivity", 2f))
+                preferences.getInt("bikeWattsPerShift", 10))
+            bikeControl.setErgMode(com.spop.poverlay.erg.ErgMode.fromPreference(preferences.getString("ergMode", null)))
+            bikeControl.setSimulationSettings(com.spop.poverlay.sim.SimulationPreferences.read(preferences))
             launch { while (isActive) { bikeControl.tick(); delay(100) } }
         }
     }
 
     fun stop() {
-        bikeControl.stop()
+        bikeControl.close()
         job.cancel()
+        activeSensor?.stop()
     }
 
     private val combinedSensorState = flow {
         try {
             val binding = getV2Binder(context)
             try {
+                ensureActive()
                 val sensor = BikePlusCombinedSensor(binding.binder, bikeControl::acceptSample)
                 activeSensor = sensor
                 try {

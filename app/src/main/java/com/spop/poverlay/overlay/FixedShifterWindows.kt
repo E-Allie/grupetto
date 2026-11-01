@@ -16,6 +16,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.spop.poverlay.control.ControlMode
 import com.spop.poverlay.util.disableAnimations
 import kotlin.math.roundToInt
 
@@ -29,7 +30,7 @@ internal class FixedShifterWindows(
 ) : AutoCloseable {
     private val manager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val windows = mutableListOf<Pair<ComposeView, WindowManager.LayoutParams>>()
-    private var watts by mutableStateOf(false)
+    private var mode by mutableStateOf(ControlMode.Manual)
     private var inset = 0f
     private val observer = LifecycleEventObserver { _, event ->
         if (event == Lifecycle.Event.ON_PAUSE) hide()
@@ -39,8 +40,12 @@ internal class FixedShifterWindows(
     init { owner.lifecycle.addObserver(observer) }
 
     fun update(shown: Boolean, position: Float, shiftWatts: Boolean) {
+        update(shown, position, if (shiftWatts) ControlMode.Erg else ControlMode.Manual)
+    }
+
+    fun update(shown: Boolean, position: Float, controlMode: ControlMode) {
         inset = normalizedShifterInset(position)
-        watts = shiftWatts
+        mode = controlMode
         if (!shown || !owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) ||
             (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(context))) {
             hide()
@@ -64,7 +69,7 @@ internal class FixedShifterWindows(
                 val view = ComposeView(context).apply {
                     setViewTreeLifecycleOwner(owner)
                     setViewTreeSavedStateRegistryOwner(savedStateOwner)
-                    setContent { FixedShiftButton(up, watts) { onShift(if (up) 1 else -1) } }
+                    setContent { FixedShiftButton(up, mode) { onShift(if (up) 1 else -1) } }
                 }
                 manager.addView(view, params)
                 windows.add(view to params)

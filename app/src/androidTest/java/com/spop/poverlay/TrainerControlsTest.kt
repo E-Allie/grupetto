@@ -10,25 +10,31 @@ import com.spop.poverlay.control.BikeControl
 import com.spop.poverlay.control.BikeSample
 import com.spop.poverlay.ui.theme.PTONOverlayTheme
 import org.junit.Assert.*
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
 
 class TrainerControlsTest {
     @get:Rule val compose = createComposeRule()
-    private val control = BikeControl(true, { 1000L }) { error("UI tests must not drive a motor") }
+    private val writes = mutableListOf<Int>()
+    private val control = BikeControl(true, { 1000L }) { writes.add(it); true }
+    @After fun closeController() { control.close() }
+
     private fun setup() {
         control.acceptSample(BikeSample(150f, 80f, 40, 1000))
+        control.setSimulationSettings(com.spop.poverlay.sim.SimulationSettings(enabled = true))
         compose.setContent { PTONOverlayTheme {
             val state = control.state.collectAsState().value
             SettingsDialog("Bike+ / CrossTrainer", {}) {
                 TrainerControls(state, { control.localErg(it) }, { control.localSimulation(it) },
-                    { control.localManual() }, { control.localResistance(it) }, control::tune)
+                    { control.localManual() }, { control.localResistance(it) }, control::tune,
+                    control::setErgMode, control::shift, { control.resumeLocally() }, control::pauseLocally)
             }
         } }
     }
     private fun setSlider(label: String, value: Float) {
-        compose.onNodeWithContentDescription(label).performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.SetProgress) { it(value) }
+        compose.onNodeWithContentDescription(label).performScrollTo().performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.SetProgress) { it(value) }
     }
     private fun selected(label: String) {
         listOf("ERG", "Sim", "Manual").forEach {
@@ -46,26 +52,26 @@ class TrainerControlsTest {
         selected("Manual")
         compose.onNodeWithText("ERG").performClick()
         selected("ERG")
-        compose.onNodeWithText("Gain control").assertIsDisplayed()
+        compose.onNodeWithText("Software gain").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Resistance per shift").assertDoesNotExist()
         setSlider("ERG target", 200f); setSlider("Watts per shift", 15f)
         compose.runOnIdle { control.shift(1) }
-        compose.onNodeWithText("215 W").assertIsDisplayed()
+        compose.onNodeWithText("215 W").performScrollTo().assertIsDisplayed()
         screenshot("trainer-erg.png")
-        compose.onNodeWithText("Sim").performClick()
+        compose.onNodeWithText("Sim").performScrollTo().performClick()
         selected("Sim")
         compose.onNodeWithText("Watts per shift").assertDoesNotExist()
-        setSlider("Incline", 5f); setSlider("Incline sensitivity", 3f)
-        setSlider("Resistance per shift", 4f)
-        compose.runOnIdle { control.shift(1) }
-        assertEquals(4, control.state.value.shiftOffset)
-        val incline = compose.onNodeWithContentDescription("Incline").fetchSemanticsNode().boundsInRoot
-        val sensitivity = compose.onNodeWithText("Incline sensitivity").fetchSemanticsNode().boundsInRoot
-        assertTrue(incline.bottom <= sensitivity.top)
+        compose.onNodeWithText("Incline sensitivity").assertDoesNotExist()
+        compose.onNodeWithText("Resistance per shift").assertDoesNotExist()
+        setSlider("Incline", 5f)
+        compose.onNodeWithText("Higher gear").performScrollTo().performClick()
+        assertEquals(13, control.state.value.gear)
+        compose.onNodeWithText("Gear 13 / 24").assertIsDisplayed()
         screenshot("trainer-sim.png")
-        compose.onNodeWithText("Manual").performClick()
+        compose.onNodeWithText("Manual").performScrollTo().performClick()
         selected("Manual")
         compose.onNodeWithText("Incline").assertDoesNotExist()
+        setSlider("Resistance per shift", 4f)
         setSlider("Resistance", 50f)
         compose.runOnIdle { control.shift(-1) }
         compose.onNodeWithText("46 points").assertIsDisplayed()
@@ -81,14 +87,11 @@ class TrainerControlsTest {
             }
             selected("ERG")
             compose.onNodeWithText("225 W").assertIsDisplayed()
-            compose.onNodeWithText("External control · $transport").assertIsDisplayed()
-            compose.onNodeWithText("Connected training apps automatically set the mode and target.").assertIsDisplayed()
+            compose.onNodeWithText("External control · $transport").performScrollTo().assertIsDisplayed()
             screenshot("trainer-external-${transport.lowercase()}.png")
-            compose.onNodeWithText("Manual").performClick()
-            compose.onNodeWithText("External control · $transport").assertDoesNotExist()
             compose.runOnIdle { control.procedure(client, byteArrayOf(0x11, 0, 0, 12, 254.toByte(), 40, 51)) }
             selected("Sim")
-            compose.onNodeWithText("-5.0%").assertIsDisplayed()
+            compose.onNodeWithText("-5.0%").performScrollTo().assertIsDisplayed()
             compose.runOnIdle { control.procedure(client, byteArrayOf(4, 38, 2)) }
             selected("Manual")
             compose.onNodeWithText("55 points").assertIsDisplayed()
@@ -96,4 +99,19 @@ class TrainerControlsTest {
             compose.onNodeWithText("External control · $transport").assertDoesNotExist()
         }
     }
+    @Test fun localStopRequiresExplicitResumeAndErgChoiceRemainsSelectable() {
+        setup()
+        compose.onNodeWithText("ERG").performClick()
+        compose.onNodeWithText("Software").performClick()
+        assertEquals(com.spop.poverlay.erg.ErgMode.Host, control.state.value.ergMode)
+        compose.onNodeWithText("Stop control").performScrollTo().performClick()
+        compose.onNodeWithText("Resume control").assertIsDisplayed()
+        assertTrue(controlNeedsResume(control.state.value))
+        compose.runOnIdle { control.localErg(200) }
+        assertTrue(controlNeedsResume(control.state.value))
+        compose.onNodeWithText("Resume control").performClick()
+        compose.runOnIdle { assertFalse(controlNeedsResume(control.state.value)) }
+        compose.onNodeWithText("Resume control").assertDoesNotExist()
+    }
+
 }

@@ -56,6 +56,25 @@ class ShifterSettingsTest {
         assertNoShifters()
     }
 
+    @Test fun fixedShiftersIdentifyTheActiveTargetAndKeepDirectionCallbacks() {
+        val mode = mutableStateOf(com.spop.poverlay.control.ControlMode.Simulation)
+        val shifts = mutableListOf<Int>()
+        compose.setContent { PTONOverlayTheme {
+            androidx.compose.foundation.layout.Row {
+                com.spop.poverlay.overlay.FixedShiftButton(false, mode.value) { shifts.add(-1) }
+                com.spop.poverlay.overlay.FixedShiftButton(true, mode.value) { shifts.add(1) }
+            }
+        } }
+        compose.onNodeWithContentDescription("Shift up: increase virtual gear").assertIsDisplayed().performClick()
+        compose.onNodeWithContentDescription("Shift down: decrease virtual gear").performClick()
+        assertEquals(listOf(1, -1), shifts)
+        compose.runOnIdle { mode.value = com.spop.poverlay.control.ControlMode.Erg }
+        compose.onNodeWithContentDescription("Shift up: increase ERG target watts").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Shift up: increase virtual gear").assertDoesNotExist()
+        compose.runOnIdle { mode.value = com.spop.poverlay.control.ControlMode.Resistance }
+        compose.onNodeWithContentDescription("Shift down: decrease resistance").assertIsDisplayed()
+    }
+
     private fun assertNoShifters() {
         compose.onNodeWithContentDescription("Shift down: decrease resistance").assertDoesNotExist()
         compose.onNodeWithContentDescription("Shift up: increase resistance").assertDoesNotExist()

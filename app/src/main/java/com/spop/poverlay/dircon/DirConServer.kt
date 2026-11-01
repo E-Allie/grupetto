@@ -7,6 +7,7 @@ import java.net.Socket
 import java.net.SocketException
 import java.util.Collections
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -64,10 +65,12 @@ class DirConServer(
         runCatching { serverSocket?.close() }
         serverSocket = null
 
-        synchronized(clients) {
-            clients.forEach { it.close() }
+        val sessions = synchronized(clients) {
+            val snapshot = clients.toList()
             clients.clear()
+            snapshot
         }
+        sessions.forEach { it.close() }
         mdnsAdvertiser.stop()
         coroutineContext.cancelChildren()
     }
@@ -81,11 +84,12 @@ class DirConServer(
         )
         val encoded = DirConCodec.encode(message)
 
-        synchronized(clients) {
-            clients
-                .filter { it.isSubscribed(uuid) && (client == null || client == it.id) }
-                .forEach { it.write(encoded) }
-        }
+        // A failed write releases controller ownership through the bridge. Never invoke it
+        // with the clients monitor held: the BLE side can call us while holding its own lock.
+        val sessions = synchronized(clients) { clients.toList() }
+        sessions
+            .filter { it.isSubscribed(uuid) && (client == null || client == it.id) }
+            .forEach { it.write(encoded) }
     }
 
     private fun handle(message: DirConMessage, session: ClientSession): DirConMessage {
@@ -170,6 +174,11 @@ class DirConServer(
     private inner class ClientSession(private val socket: Socket) {
         val id = "dircon:${UUID.randomUUID()}"
         private val subscriptions = Collections.synchronizedSet(mutableSetOf<UUID>())
+        private val closed = AtomicBoolean(false)
+        private val lifecycleLock = Any()
+        private var activeRequests = 0
+        private var transportClosed = false
+        private var disconnected = false
 
         fun run() {
             Timber.i("DIRCON client connected from ${socket.remoteSocketAddress}")
@@ -178,13 +187,13 @@ class DirConServer(
                 val readBuffer = ByteArray(512)
                 var pending = ByteArray(0)
 
-                while (isActive && !socket.isClosed) {
+                while (isActive && !closed.get() && !socket.isClosed) {
                     val read = input.read(readBuffer)
                     if (read < 0) throw EOFException()
                     pending += readBuffer.copyOf(read)
 
                     var offset = 0
-                    while (offset < pending.size) {
+                    while (offset < pending.size && !closed.get()) {
                         val decoded = runCatching {
                             DirConCodec.decode(pending, offset, pending.size - offset)
                         }.getOrElse { error ->
@@ -192,7 +201,7 @@ class DirConServer(
                             null
                         } ?: break
 
-                        val response = handle(decoded.message, this)
+                        val response = handleWhileOpen(decoded.message) ?: break
                         write(DirConCodec.encode(response))
                         offset += decoded.bytesConsumed
                     }
@@ -205,7 +214,6 @@ class DirConServer(
             } catch (error: Exception) {
                 Timber.e(error, "DIRCON client failed")
             } finally {
-                clients.remove(this)
                 close()
             }
         }
@@ -220,18 +228,54 @@ class DirConServer(
 
         fun isSubscribed(uuid: UUID): Boolean = subscriptions.contains(uuid)
 
+        private fun handleWhileOpen(message: DirConMessage): DirConMessage? {
+            synchronized(lifecycleLock) {
+                if (closed.get()) return null
+                activeRequests++
+            }
+            try {
+                return handle(message, this)
+            } finally {
+                synchronized(lifecycleLock) { activeRequests-- }
+                disconnectWhenIdle()
+            }
+        }
+
         fun write(bytes: ByteArray) {
             runCatching {
                 synchronized(socket) {
+                    if (closed.get()) return
                     socket.getOutputStream().write(bytes)
                     socket.getOutputStream().flush()
                 }
-            }.onFailure { Timber.d(it, "Failed to write DIRCON frame") }
+            }.onFailure {
+                Timber.d(it, "Failed to write DIRCON frame")
+                // Close outside the write monitor and unblock any pending read. Idle ownership
+                // is released now rather than waiting for the reader coroutine to finish.
+                close()
+            }
         }
 
         fun close() {
-            bridge.disconnected(id)
+            if (!closed.compareAndSet(false, true)) return
             runCatching { socket.close() }
+            clients.remove(this)
+            synchronized(lifecycleLock) { transportClosed = true }
+            disconnectWhenIdle()
+        }
+
+        private fun disconnectWhenIdle() {
+            // An in-flight control write must finish before releasing its ownership; otherwise
+            // it could grant control again after the disconnect. The callback runs without locks.
+            val notify = synchronized(lifecycleLock) {
+                if (!transportClosed || activeRequests != 0 || disconnected) {
+                    false
+                } else {
+                    disconnected = true
+                    true
+                }
+            }
+            if (notify) bridge.disconnected(id)
         }
     }
 }

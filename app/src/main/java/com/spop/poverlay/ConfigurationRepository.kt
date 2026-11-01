@@ -6,6 +6,9 @@ import androidx.core.content.edit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import com.spop.poverlay.erg.ErgMode
+import com.spop.poverlay.sim.SimulationSettings
+import com.spop.poverlay.sim.SimulationPreferences
 import com.spop.poverlay.overlay.OverlayLocation
 import kotlinx.coroutines.flow.MutableStateFlow
 
@@ -13,6 +16,7 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
 
     enum class Preferences(val key: String) {
         ShowTimerWhenMinimized("showTimerWhenMinimized"),
+        ShowTrainerStatus("showTrainerStatus"),
         ShowShifters("showShifters"),
         ShifterInset("shifterInset"),
         BleTxEnabled("bleTxEnabled"),
@@ -22,7 +26,8 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
         OverlayLocation("overlayLocation"),
         AntPlusTxEnabled("antPlusTxEnabled"),
         AutoStartOnBoot("autoStartOnBoot"),
-        SerialNumber("serialNumber")
+        SerialNumber("serialNumber"),
+        ErgControl("ergMode")
     }
 
     companion object {
@@ -34,6 +39,7 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
     }
 
     private val mutableShowTimerWhenMinimized = MutableStateFlow(true)
+    private val mutableShowTrainerStatus = MutableStateFlow(false)
     val showShifters = MutableStateFlow(true)
     val shifterInset = MutableStateFlow(0f)
     private val mutableBleTxEnabled = MutableStateFlow(true)
@@ -42,14 +48,19 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
     private val mutableAntPlusTxEnabled = MutableStateFlow(false)
     private val mutableAutoStartOnBoot = MutableStateFlow(false)
     private val mutableSerialNumber = MutableStateFlow("")
+    private val mutableErgMode = MutableStateFlow(ErgMode.Default)
+    private val mutableSimulationSettings = MutableStateFlow(SimulationSettings())
 
     val showTimerWhenMinimized = mutableShowTimerWhenMinimized
+    val showTrainerStatus = mutableShowTrainerStatus
     val bleTxEnabled = mutableBleTxEnabled
     val dirConEnabled = mutableDirConEnabled
     val bleFtmsDeviceName = mutableBleFtmsDeviceName
     val antPlusTxEnabled = mutableAntPlusTxEnabled
     val autoStartOnBoot = mutableAutoStartOnBoot
     val serialNumber = mutableSerialNumber
+    val ergMode = mutableErgMode
+    val simulationSettings = mutableSimulationSettings
 
     private val sharedPreferences: SharedPreferences
 
@@ -85,6 +96,11 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
     fun setShowShifters(shown: Boolean) {
         showShifters.value = shown
         sharedPreferences.edit { putBoolean(Preferences.ShowShifters.key, shown) }
+    }
+
+    fun setShowTrainerStatus(shown: Boolean) {
+        mutableShowTrainerStatus.value = shown
+        sharedPreferences.edit { putBoolean(Preferences.ShowTrainerStatus.key, shown) }
     }
 
     fun setShifterInset(inset: Float) {
@@ -136,6 +152,16 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
         }
     }
 
+    fun setErgMode(mode: ErgMode) {
+        mutableErgMode.value = mode
+        sharedPreferences.edit { putString(Preferences.ErgControl.key, mode.name) }
+    }
+
+    fun setSimulationSettings(settings: SimulationSettings) {
+        SimulationPreferences.write(sharedPreferences, settings)
+        mutableSimulationSettings.value = settings
+    }
+
     val overlayHorizontalOffset: Float
         get() = sharedPreferences.getFloat(Preferences.OverlayHorizontalOffset.key, 0f)
             .takeIf { it.isFinite() } ?: 0f
@@ -158,6 +184,9 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
     }
 
     private fun updateFromSharedPrefs() {
+        mutableErgMode.value = ErgMode.read(sharedPreferences, Preferences.ErgControl.key)
+        mutableSimulationSettings.value = SimulationPreferences.read(sharedPreferences)
+        mutableShowTrainerStatus.value = sharedPreferences.getBoolean(Preferences.ShowTrainerStatus.key, false)
         showShifters.value = sharedPreferences.getBoolean(Preferences.ShowShifters.key, true)
         shifterInset.value = com.spop.poverlay.overlay.normalizedShifterInset(
             sharedPreferences.getFloat(Preferences.ShifterInset.key, 0f))

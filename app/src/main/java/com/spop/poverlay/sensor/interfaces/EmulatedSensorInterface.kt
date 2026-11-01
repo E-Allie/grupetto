@@ -29,7 +29,7 @@ class EmulatedSensorInterface(val model: EmulatedModel) : SensorInterface {
             while (isActive) {
                 phase += .1f
                 val variation = kotlin.math.sin(phase)
-                power.value = if (deviceType == DeviceType.Bike) resistance.value * 3.75f + variation else 150f + variation
+                power.value = if (deviceType == DeviceType.Bike) (resistance.value * 3.75f + variation).coerceAtLeast(0f) else 150f + variation
                 cadence.value = if (deviceType == DeviceType.Bike) 80f + variation else 0f
                 speed.value = if (deviceType == DeviceType.Tread) 6.2f + variation * .01f else 19.5f + variation * .01f
                 bikeControl?.acceptSample(BikeSample(power.value, cadence.value, resistance.value.toInt(), SystemClock.elapsedRealtime()))
