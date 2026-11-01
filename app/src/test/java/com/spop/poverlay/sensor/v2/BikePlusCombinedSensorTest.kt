@@ -32,7 +32,9 @@ class BikePlusCombinedSensorTest {
         every { reply.readInt() } returnsMany listOf(1, 42, 43)
         every { reply.readLong() } returnsMany listOf(85L, 18000L, 0L, 0L)
         every { reply.readString() } returns "5.11"
-        every { reply.createByteArray() } returns titanPacket(pzafSetpoint = 180)
+        every { reply.createByteArray() } returns titanPacket(pzafSetpoint = 180).also {
+            java.nio.ByteBuffer.wrap(it).putInt(36, 42).putInt(40, 43)
+        }
         every { reply.recycle() } answers { recycled.countDown() }
     }
     @After fun cleanup() { unmockkStatic(Parcel::class) }
@@ -49,7 +51,7 @@ class BikePlusCombinedSensorTest {
             assertTrue(received.await(2, TimeUnit.SECONDS))
             assertEquals(TitanStatusReading(sensor.latestStatus!!, 1234L), sensor.latestStatusReading)
             assertEquals(1234L, sensor.latestStatusTimestamp)
-            assertEquals(BikeSample(180f, 85f, 43, 1234L), samples.first())
+            assertEquals(BikeSample(180f, 85f, 43, 1234L, physicalResistance = 42), samples.first())
         } finally {
             sensor.stop()
             assertTrue(recycled.await(2, TimeUnit.SECONDS))

@@ -26,6 +26,7 @@ import com.dsi.ant.message.ipc.AntMessageParcel
 import com.spop.poverlay.BuildConfig
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
@@ -111,6 +112,18 @@ class AntPlusHandler(
     private var isChannelSetupInProgress = false
     @Volatile private var closed = false
 
+    // The ANT library delivers channel events on its receive thread while holding its own
+    // channel lock. Handling them inline would block that thread on this handler's monitor,
+    // while shutdown()/cleanupChannel() hold the monitor and call AntChannel.release(), which
+    // needs the ANT lock: an AB-BA deadlock (seen as an ANR when quitting with the HRM relay
+    // active). Events are handed to one serial dispatcher so the ANT thread never waits on us.
+    private val antEventDispatcher = Dispatchers.IO.limitedParallelism(1)
+
+    private fun handleOffAntThread(block: () -> Unit) {
+        if (closed) return
+        scope.launch(antEventDispatcher) { if (!closed) block() }
+    }
+
     private val channelProviderStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != AntChannelProvider.ACTION_CHANNEL_PROVIDER_STATE_CHANGED) {
@@ -141,14 +154,15 @@ class AntPlusHandler(
         override fun onReceiveMessage(messageType: MessageFromAntType, messageParcel: AntMessageParcel) {
             when (messageType) {
                 MessageFromAntType.ACKNOWLEDGED_DATA -> {
-                    handleAcknowledgedData(messageParcel)
+                    val payload = AcknowledgedDataMessage(messageParcel).payload
+                    handleOffAntThread { handleAcknowledgedData(payload) }
                 }
 
                 MessageFromAntType.CHANNEL_EVENT -> {
                     val eventCode = ChannelEventMessage(messageParcel).eventCode
                     when (eventCode) {
                         EventCode.TX -> {
-                            pushCurrentPayload()
+                            handleOffAntThread { pushCurrentPayload() }
                         }
 
                         EventCode.CHANNEL_CLOSED -> {
@@ -184,7 +198,7 @@ class AntPlusHandler(
                     val eventCode = ChannelEventMessage(messageParcel).eventCode
                     when (eventCode) {
                         EventCode.TX -> {
-                            pushCscPayload()
+                            handleOffAntThread { pushCscPayload() }
                         }
 
                         EventCode.CHANNEL_CLOSED -> {
@@ -215,7 +229,7 @@ class AntPlusHandler(
                 MessageFromAntType.CHANNEL_EVENT -> {
                     val eventCode = ChannelEventMessage(messageParcel).eventCode
                     when (eventCode) {
-                        EventCode.TX -> pushHrmPayload()
+                        EventCode.TX -> handleOffAntThread { pushHrmPayload() }
                         EventCode.CHANNEL_CLOSED -> {
                             logDebug("ANT_DEBUG: ANT HRM channel closed")
                             isHrmChannelOpen = false
@@ -602,8 +616,7 @@ class AntPlusHandler(
     }
 
     @Synchronized
-    private fun handleAcknowledgedData(messageParcel: AntMessageParcel) {
-        val payload = AcknowledgedDataMessage(messageParcel).payload
+    private fun handleAcknowledgedData(payload: ByteArray) {
         if (payload.size < AntPlusConstants.ANT_MESSAGE_SIZE) {
             return
         }

@@ -2,7 +2,7 @@ package com.spop.poverlay.overlay
 
 import android.text.format.DateUtils
 import com.spop.poverlay.ConfigurationRepository
-import com.spop.poverlay.util.tickerFlow
+import com.spop.poverlay.util.alignedTickerFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
@@ -50,9 +50,10 @@ open class OverlayTimerViewModel(
     }.stateIn(this, SharingStarted.Eagerly, "‒ ‒:‒ ‒")
 
     init {
-        // Tick every second when timer is running
+        // Tick every second when timer is running. The ticker is aligned with the overlay's UI
+        // tick, so the timer label updates in the same frame as the readouts.
         launch {
-            tickerFlow(period = 1.seconds).collect {
+            alignedTickerFlow(period = 1.seconds).collect {
                 if (mutableTimerRunning.value) {
                     accumulatedSeconds++
                     mutableAccumulatedSeconds.value = accumulatedSeconds

@@ -17,8 +17,8 @@ android {
         applicationId "com.spop.poverlay"
         minSdk 21
         targetSdk 34
-        versionCode 44
-        versionName "v0.0.42"
+        versionCode 52
+        versionName "v0.0.49-integrated.1"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -52,8 +52,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (project.hasProperty("localPackageSuffix")) applicationIdSuffix project.property("localPackageSuffix")
+        }
         release {
-            minifyEnabled false
+            // R8 shrinks and optimizes the release build; Compose runs noticeably faster
+            // optimized on the original Bike's MT8173. Obfuscation is off (see proguard-rules.pro).
+            minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.release
         }

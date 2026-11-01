@@ -58,6 +58,16 @@ axis, software uses feedback without table prediction or gain scheduling; it
 does not substitute a 400 W prediction for a higher target. Software feedback
 pauses below 25 rpm.
 
+The saved **Software algorithm** choice is independent of Native/Auto/Software:
+**Firmware table** remains the default. **Upstream learned model** ports the
+upstream `5061774` ERG algorithm behind the same coordinator and actuator lock.
+It learns steady native-bike watts in memory, ramps modeled jumps at 10 levels/s,
+holds power correction for 4.5 seconds after arrival, and uses a half-level power
+deadband (at least 3 W). Ordinary feedback adjustments retain the upstream
+3-level/s bound; direct resistance commands and our SIM scheduler do not inherit
+that bound. External-meter control disables the upstream model's predicted jumps.
+Changing the algorithm during regulation stops control until local Resume.
+
 ## Terrain simulation
 
 **Terrain resistance** is opt-in. Sim converts slope, wind, rolling resistance,
@@ -113,12 +123,27 @@ target while cadence is zero. This describes command dispatch, not instantaneous
 physical brake travel. Software ERG retains its feedback stability bounds, and
 SIM retains its power scheduling limits.
 
-The physical knob takes priority. An unexpected resistance target, native knob
-disable, failed write, missing acknowledgement, sensor loss or stale data stops
-regulation and latches the stop. **Stop control** does the same. Another remote
-target, Request Control, Reset or Start/Resume cannot clear that latch; the rider
-must use the local **Resume control** action. ERG and SIM shifters can adjust the
-retained watt target or gear while suspended without commanding the brake.
+The physical knob takes priority. Firmware target echoes and physical brake
+position are represented separately. Direct resistance acknowledgement accepts
+two distinct fresh target echoes within two points of the requested target. The
+previous target is permitted while awaiting acknowledgement, for at most three
+seconds. Thus a requested 50 that settles at an echoed 49 does not trigger a
+false manual override. Once acknowledged, a subsequent target change is an
+intervention, even if it is only one point; the tolerance is not a permanent
+dead zone around the requested value. No motor command is automatically retried.
+
+An adjustment that remains unacknowledged is a **recoverable resistance fault**.
+It stops control and preserves its reason across Reset. Updated Scatto can clear
+that specific fault only through the rider's explicit Resume action, with a fresh
+connection, the current control lease, and the exact fault-generation token.
+Recovery itself sends no motor target; the resumed workout then sends its target.
+
+Unexpected target changes, native knob disables, failed writes, sensor loss,
+stale data, configuration changes and **Stop control** remain local-resume
+conditions. Ordinary Request Control, Reset, Start/Resume, new targets and new
+workouts cannot clear them. Stop also wins between a recovery acknowledgement
+and the next target. ERG and SIM shifters can adjust the retained watt target or
+gear while suspended without commanding the brake.
 
 Bike power/cadence/resistance and native status must be no more than 1.5 seconds
 old. SIM additionally checks cadence against its one-second freshness window.
@@ -137,6 +162,9 @@ status and Resume/Stop row independently of the statistics. It is off by default
 and the choice is saved. Hiding it removes its height as well; the full statistics
 remain visible and trainer control continues unchanged. Resume/Stop remain
 available under **Trainer control → Modes & tuning** in settings.
+A compact fault-only notice remains visible when the large row is hidden. It
+indicates whether Scatto may resume or Grupetto's local controls are required;
+its **Controls** button opens settings and never rearms the brake by itself.
 
 ## FTMS ownership and transports
 
@@ -191,11 +219,19 @@ to zero for ride metrics; reserved flags and trailing bytes are ignored.
 
 Fresh external watts supply the overlay, BLE, DIRCON and ANT+ and the software
 controller used for both ERG and Sim. Native watts remain visible as a smaller
-**Peloton … W** comparison. After three seconds without a valid packet, metrics
+**Bike … W** comparison. After three seconds without a valid packet, metrics
 fall back to native watts; after twelve seconds the meter connection is released
 for reconnection. Changing, losing or replacing a power source during ERG or Sim,
 including while paused, suspends control until local Resume. A live external
 meter cannot hide a stalled bike connection.
+
+Upstream's selected-power stream now supplies the display and broadcasts without
+the previous additional 0.7 power EMA. Native display power uses upstream's
+900 ms buckets; fresh external watts retain their selected-meter behavior.
+Cadence keeps its separate 0.7 EMA. Updated Scatto negotiates these formats
+through the optional [trainer protocol](trainer-protocol.md), so it does not
+invert a power EMA that is no longer applied. Raw native and external feedback
+timestamps remain separate from display averaging and from each other.
 
 Optional ANT+ transmission, the dashboard, paged sensor lists, heart-rate zones,
 opt-in boot startup and Tread telemetry remain available as described in the
@@ -216,5 +252,6 @@ lifecycle. Android protocol and Compose checks use fake actuators. These tests
 can verify commands, state and layout; they do not establish physical motor
 response, training-app interoperability or external-meter regulation on a ridden
 Bike+/CrossTrainer. Current build, lint and device-test results should be reported
-with the build being evaluated. No ride recorder, telemetry capture hooks or
-diagnostic replay tooling is included in this integration.
+with the build being evaluated. Developer ride recorders, telemetry capture hooks
+and diagnostic replay tooling remain local and are excluded from commits. Upstream
+user-facing calibration capture, backups and service discovery are retained.

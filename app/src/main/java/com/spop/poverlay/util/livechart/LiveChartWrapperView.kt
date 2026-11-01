@@ -855,5 +855,12 @@ open class LiveChartView(context: Context, attrs: AttributeSet?) : View(context,
             bottom = hh,
             start = paddingLeft.toFloat()
         )
+
+        // Paths are computed in pixel space by drawDataset(), so rebuild them for the new
+        // geometry instead of waiting for the next dataset change (which may never come if
+        // the data is static, e.g. when the chart is resized via long-press).
+        if (dataset.hasData()) {
+            drawDataset()
+        }
     }
 }

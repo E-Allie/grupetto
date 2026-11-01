@@ -15,5 +15,7 @@ internal fun decodeCyclingPower(bytes: ByteArray): Int? {
 
 data class ExternalPowerReading(val watts: Int, val timestamp: Long, val address: String)
 
+internal const val ExternalPowerStaleMillis = 3000L
+
 internal fun freshExternalPower(reading: ExternalPowerReading?, now: Long): Float? =
-    reading?.takeIf { now - it.timestamp in 0..3000 }?.watts?.coerceAtLeast(0)?.toFloat()
+    reading?.takeIf { now - it.timestamp in 0..ExternalPowerStaleMillis }?.watts?.coerceAtLeast(0)?.toFloat()

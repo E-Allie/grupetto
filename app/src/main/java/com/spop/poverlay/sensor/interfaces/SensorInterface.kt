@@ -13,6 +13,9 @@ interface SensorInterface {
     val titanControl: com.spop.poverlay.sensor.v2.TitanControl? get() = null
     val bikeControl: com.spop.poverlay.control.BikeControl? get() = null
     val power: Flow<Float>
+    /** Display and broadcasts share selected watts; ERG has separate pedal feedback. */
+    val displayPower: Flow<com.spop.poverlay.sensor.power.PowerDisplay>
+        get() = power.map { com.spop.poverlay.sensor.power.PowerDisplay(it) }
     /** Native watts remain available for comparison when an external meter supplies [power]. */
     val nativePower: Flow<Float> get() = power
     val usesExternalPower: Flow<Boolean> get() = flowOf(false)

@@ -251,7 +251,7 @@ class BleServer(
 
         override fun writeCharacteristic(uuid: UUID, value: ByteArray): Boolean {
             // Control writes require a session identity; the session-aware overload handles them.
-            if (uuid == FitnessMachineConstants.ControlPointUUID) return false
+            if (uuid == FitnessMachineConstants.ControlPointUUID || uuid == com.spop.poverlay.control.TrainerProtocol.RECOVER_UUID) return false
             val characteristic = findGattCharacteristic(uuid) ?: return false
             val writable = characteristic.properties and
                 (BluetoothGattCharacteristic.PROPERTY_WRITE or
@@ -264,6 +264,9 @@ class BleServer(
         }
 
         override fun writeCharacteristic(client: String, uuid: UUID, value: ByteArray): Boolean {
+            if (uuid == com.spop.poverlay.control.TrainerProtocol.RECOVER_UUID) {
+                return advertisedServices().filterIsInstance<FitnessMachineService>().firstOrNull()?.recoverControl(client, value) == true
+            }
             if (uuid != FitnessMachineConstants.ControlPointUUID) return writeCharacteristic(uuid, value)
             val service = advertisedServices().filterIsInstance<FitnessMachineService>().firstOrNull() ?: return false
             val response = service.handleControl(client, value)
@@ -533,7 +536,6 @@ class BleServer(
 
         // Reset smoothing and CSC state so a restart begins fresh.
         smoothedCadence = null
-        smoothedPower = null
         smoothedSpeedMph = null
         cscCrankResidual = 0.0
         cscWheelResidual = 0.0
@@ -1426,11 +1428,11 @@ class BleServer(
                     buffers?.let { data ->
                         // Robust outlier filtering per metric, then light exponential smoothing
                         val rCadence = robustAverage(data.cadence)
-                        val rPower = robustAverage(data.power)
                         val rSpeedMph = robustAverage(data.speed) // mph
 
                         val sCadence = smoothCadence(rCadence)
-                        val sPower = smoothPower(rPower)
+                        // Power is already selected/averaged with the overlay. Never filter it a second time.
+                        val sPower = data.power.lastOrNull { it.isFinite() } ?: 0f
                         val sSpeedMph = smoothSpeed(rSpeedMph)
                         // Resistance is a discrete setting, already spike-filtered by the
                         // sensor interface. Averaging/smoothing invents intermediate levels
@@ -1493,7 +1495,6 @@ class BleServer(
 
     // Exponential smoothing states and helpers
     private var smoothedCadence: Float? = null
-    private var smoothedPower: Float? = null
     private var smoothedSpeedMph: Float? = null
 
     private fun smooth(prev: Float?, value: Float, alpha: Float): Float =
@@ -1504,11 +1505,6 @@ class BleServer(
     private fun smoothCadence(v: Float, alpha: Float = 0.7f): Float {
         smoothedCadence = smooth(smoothedCadence, v, alpha)
         return smoothedCadence!!
-    }
-
-    private fun smoothPower(v: Float, alpha: Float = 0.7f): Float {
-        smoothedPower = smooth(smoothedPower, v, alpha)
-        return smoothedPower!!
     }
 
     private fun smoothSpeed(vMph: Float, alpha: Float = 0.7f): Float {
@@ -1575,6 +1571,15 @@ class BleServer(
         }
     }
 
+
+    /** Machine name for Device Information Model Number; see [com.spop.poverlay.util.machineModelNumber]. */
+    val modelNumber: String by lazy {
+        com.spop.poverlay.util.machineModelNumber(
+            com.spop.poverlay.util.IsRunningOnPeloton,
+            android.os.Build.MODEL ?: "",
+            com.spop.poverlay.util.readPelotonPlatform(context)
+        )
+    }
 
     //Function checks userprefs to see if serial number has been generated on previous ones, and if not, It creates one.
     fun serialNumber(): String {

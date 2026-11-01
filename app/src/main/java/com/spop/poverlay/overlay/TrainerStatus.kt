@@ -64,3 +64,17 @@ internal fun TrainerStatus(state: ControlState, onResume: () -> Unit, onStop: ()
         }
     }
 }
+
+internal val TrainerFaultHeight = 48.dp
+
+/** Fault-only notice remains available when the optional large control row is hidden. */
+@Composable
+internal fun TrainerFaultNotice(state: ControlState, onOpenSettings: () -> Unit) {
+    Row(Modifier.widthIn(max = 640.dp).height(TrainerFaultHeight).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(if (state.fault?.remoteRecoverable == true) "Resistance adjustment failed · Resume in Scatto or Grupetto"
+            else "Control stopped · Resume in Grupetto", color = Color(0xFFFFD48A), fontSize = 13.sp,
+            modifier = Modifier.weight(1f), maxLines = 2)
+        OutlinedButton(onOpenSettings) { Text("Controls") }
+    }
+}

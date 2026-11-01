@@ -40,6 +40,7 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
 
     private val mutableShowTimerWhenMinimized = MutableStateFlow(true)
     private val mutableShowTrainerStatus = MutableStateFlow(false)
+    val softwareAlgorithm = MutableStateFlow(com.spop.poverlay.erg.SoftwareErgAlgorithm.FirmwareTable)
     val showShifters = MutableStateFlow(true)
     val shifterInset = MutableStateFlow(0f)
     private val mutableBleTxEnabled = MutableStateFlow(true)
@@ -91,6 +92,11 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
         sharedPreferences.edit {
             putBoolean(Preferences.ShowTimerWhenMinimized.key, isShown)
         }
+    }
+
+    fun setSoftwareAlgorithm(value: com.spop.poverlay.erg.SoftwareErgAlgorithm) {
+        softwareAlgorithm.value = value
+        sharedPreferences.edit { putString("softwareErgAlgorithm", value.name) }
     }
 
     fun setShowShifters(shown: Boolean) {
@@ -184,6 +190,7 @@ class ConfigurationRepository(context: Context, lifecycleOwner: LifecycleOwner, 
     }
 
     private fun updateFromSharedPrefs() {
+        softwareAlgorithm.value = com.spop.poverlay.erg.SoftwareErgAlgorithm.read(sharedPreferences.getString("softwareErgAlgorithm", null))
         mutableErgMode.value = ErgMode.read(sharedPreferences, Preferences.ErgControl.key)
         mutableSimulationSettings.value = SimulationPreferences.read(sharedPreferences)
         mutableShowTrainerStatus.value = sharedPreferences.getBoolean(Preferences.ShowTrainerStatus.key, false)

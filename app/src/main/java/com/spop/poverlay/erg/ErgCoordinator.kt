@@ -36,6 +36,11 @@ class ErgCoordinator(
     private val mutableState = MutableStateFlow(ErgState())
     val state: StateFlow<ErgState> = mutableState.asStateFlow()
     private val host = HostErgController(writeResistance, clock, commandLock, ::standDown)
+    private val upstream = UpstreamSoftwareErgController(writeResistance, clock, commandLock, ::standDown)
+    private var algorithm = SoftwareErgAlgorithm.FirmwareTable
+    fun setSoftwareAlgorithm(value: SoftwareErgAlgorithm) = synchronized(commandLock) {
+        host.disable(); upstream.disable(); algorithm = value
+    }
     private val native = nativeControl?.let { NativePzafController(it, clock, ::standDown) }
     private val probe = PzafProbe(nativeControl, clock)
     private var pending: Pair<ErgMode, Boolean>? = null
@@ -44,11 +49,15 @@ class ErgCoordinator(
     private val completion: kotlinx.coroutines.DisposableHandle? = scope.coroutineContext[Job]?.invokeOnCompletion { close() }
 
     fun sample(power: Float, cadence: Float, resistance: Int, timestamp: Long,
-               staleAfterMs: Long = HostErgController.FRESHNESS_MS) = synchronized(commandLock) {
-        if (!closed) host.sample(power, cadence, resistance, timestamp, staleAfterMs)
+               staleAfterMs: Long = HostErgController.FRESHNESS_MS, nativePower: Float = power,
+               bikeTimestamp: Long = timestamp, external: Boolean = false) = synchronized(commandLock) {
+        if (!closed) {
+            host.sample(power, cadence, resistance, timestamp, staleAfterMs)
+            upstream.sample(power, cadence, resistance, timestamp, staleAfterMs, nativePower, bikeTimestamp, external)
+        }
     }
 
-    fun setGain(gain: Float) = synchronized(commandLock) { host.setGain(gain) }
+    fun setGain(gain: Float) = synchronized(commandLock) { host.setGain(gain); upstream.setGain(gain) }
 
     /** null means that native capability is still being checked. */
     fun preferredPath(mode: ErgMode, forceHost: Boolean = false): ErgPath? = synchronized(commandLock) {
@@ -71,7 +80,7 @@ class ErgCoordinator(
             val desired = preferredPath(mode, forceHost)
             if (desired == previousPath) return@synchronized setTarget(watts)
         }
-        host.disable()
+        host.disable(); upstream.disable()
         // Release native ownership even when switching directly to software.
         if (!releaseNative(force = true)) {
             standDown("Could not release native Auto Follow")
@@ -90,7 +99,7 @@ class ErgCoordinator(
             return@synchronized true
         }
         val accepted = when (state.value.path) {
-            ErgPath.Host -> host.setTarget(watts)
+            ErgPath.Host -> if (algorithm == SoftwareErgAlgorithm.FirmwareTable) host.setTarget(watts) else upstream.setTarget(watts)
             ErgPath.Native -> native?.setTarget(watts) == true
             ErgPath.None -> false
         }
@@ -104,7 +113,7 @@ class ErgCoordinator(
         publishCapability()
         if (pending != null) activateIfReady()
         when (state.value.path) {
-            ErgPath.Host -> host.tick()
+            ErgPath.Host -> if (algorithm == SoftwareErgAlgorithm.FirmwareTable) host.tick() else upstream.tick()
             ErgPath.Native -> native?.tick()
             ErgPath.None -> Unit
         }
@@ -114,7 +123,7 @@ class ErgCoordinator(
     fun disable(forceNative: Boolean = false): Boolean = synchronized(commandLock) {
         pending = null
         probe.cancel()
-        host.disable()
+        host.disable(); upstream.disable()
         val released = releaseNative(forceNative)
         mutableState.value = state.value.copy(active = false, path = ErgPath.None)
         if (!released) standDown("Could not release native Auto Follow")
@@ -138,7 +147,7 @@ class ErgCoordinator(
         }
         if (path == ErgPath.Host) probe.cancel()
         val accepted = when (path) {
-            ErgPath.Host -> host.enable(state.value.targetWatts)
+            ErgPath.Host -> if (algorithm == SoftwareErgAlgorithm.FirmwareTable) host.enable(state.value.targetWatts) else upstream.enable(state.value.targetWatts)
             ErgPath.Native -> native?.enable(state.value.targetWatts) == true
             ErgPath.None -> false
         }
@@ -152,12 +161,12 @@ class ErgCoordinator(
     private fun publishActive() {
         val active = when (state.value.path) {
             ErgPath.Native -> native?.isActive == true
-            ErgPath.Host -> host.isActive
+            ErgPath.Host -> if (algorithm == SoftwareErgAlgorithm.FirmwareTable) host.isActive else upstream.isActive
             ErgPath.None -> false
         }
         val target = when (state.value.path) {
             ErgPath.Native -> native?.targetWatts ?: state.value.targetWatts
-            ErgPath.Host -> host.targetWatts
+            ErgPath.Host -> if (algorithm == SoftwareErgAlgorithm.FirmwareTable) host.targetWatts else upstream.targetWatts
             ErgPath.None -> state.value.targetWatts
         }
         mutableState.value = state.value.copy(active = active, targetWatts = target)
@@ -185,7 +194,7 @@ class ErgCoordinator(
     private fun standDown(reason: String) {
         pending = null
         probe.cancel()
-        host.disable()
+        host.disable(); upstream.disable()
         releaseNative()
         mutableState.value = state.value.copy(active = false, path = ErgPath.None, suspended = true, standDownReason = reason)
         // BikeControl may synchronously stop/disable in this callback. A rejected

@@ -1,19 +1,16 @@
-@file:OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
-
 package com.spop.poverlay.sensor
 
 import com.spop.poverlay.sensor.interfaces.SensorInterface
-import com.spop.poverlay.util.selectForever
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.selects.onTimeout
 import kotlin.coroutines.CoroutineContext
 import kotlin.time.ExperimentalTime
 import kotlin.time.Duration.Companion.minutes
@@ -48,9 +45,13 @@ class DeadSensorDetector(
         // Once the dead sensor warning has been shown,
         // wait at least this long before showing it again
         val DeadSensorWarningInterval = 5.minutes
+
+        private val DeadSensorCheckPeriod = 1.seconds
     }
 
-    private val resetTimeoutChannel = Channel<Unit>()
+    // Written by the sensor collectors, read by the detection loop. A plain write per sample
+    // replaces a channel send that woke the detector and re-armed its timeout on every reading.
+    @Volatile private var lastSampleNanos = System.nanoTime()
     private var lastDeadSensorMessageMillis: Long? = null
 
     init {
@@ -60,49 +61,37 @@ class DeadSensorDetector(
 
     // Whenever a value is received for a sensor, reset the dead sensor timeout
     private fun setupTimeoutReset() {
-        launch(Dispatchers.IO) {
-            // An external meter must not hide a stalled Peloton sensor service.
-            sensorInterface.nativePower.collect(object : FlowCollector<Float> {
-                override suspend fun emit(value: Float) {
-                    resetTimeoutChannel.trySend(Unit)
-                }
-            })
+        val resetTimeout = object : FlowCollector<Float> {
+            override suspend fun emit(value: Float) {
+                lastSampleNanos = System.nanoTime()
+            }
         }
-        launch(Dispatchers.IO) {
-            sensorInterface.resistance.collect(object : FlowCollector<Float> {
-                override suspend fun emit(value: Float) {
-                    resetTimeoutChannel.trySend(Unit)
-                }
-            })
-        }
-        launch(Dispatchers.IO) {
-            sensorInterface.cadence.collect(object : FlowCollector<Float> {
-                override suspend fun emit(value: Float) {
-                    resetTimeoutChannel.trySend(Unit)
-                }
-            })
-        }
+        // An external meter must not hide a stalled Peloton sensor service.
+        launch(Dispatchers.IO) { sensorInterface.nativePower.collect(resetTimeout) }
+        launch(Dispatchers.IO) { sensorInterface.resistance.collect(resetTimeout) }
+        launch(Dispatchers.IO) { sensorInterface.cadence.collect(resetTimeout) }
     }
 
     // When the Bike is left on for a few days, occasionally the system stops being able to respond
-    // If DeadSensorTimeout passes without any messages being received, show an error message
+    // If DeadSensorTimeout passes without any messages being received, show an error message.
+    // Checked once a second, so the warning appears 10-11 s after the last reading.
     private fun setupDeadSensorDetection() =
         launch(Dispatchers.IO) {
-            selectForever<Unit> {
-                resetTimeoutChannel.onReceive { }  // Do nothing if the timeout was reset
+            while (isActive) {
+                delay(DeadSensorCheckPeriod)
+                if (System.nanoTime() - lastSampleNanos <= DeadSensorTimeout.inWholeNanoseconds) {
+                    continue
+                }
+                // Check 'DeadSensorWarningInterval' has passed
+                // since the last error emission
+                val canShowMessage = lastDeadSensorMessageMillis?.let {
+                    System.currentTimeMillis() - it >
+                            DeadSensorWarningInterval.inWholeMilliseconds
+                } ?: true
 
-                onTimeout(DeadSensorTimeout) {
-                    // Check 'DeadSensorWarningInterval' has passed
-                    // since the last error emission
-                    val canShowMessage = lastDeadSensorMessageMillis?.let {
-                        System.currentTimeMillis() - it >
-                                DeadSensorWarningInterval.inWholeMilliseconds
-                    } ?: true
-
-                    if (canShowMessage) {
-                        lastDeadSensorMessageMillis = System.currentTimeMillis()
-                        mutableDeadSensorDetected.tryEmit(Unit)
-                    }
+                if (canShowMessage) {
+                    lastDeadSensorMessageMillis = System.currentTimeMillis()
+                    mutableDeadSensorDetected.tryEmit(Unit)
                 }
             }
         }

@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.flow
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.time.Duration
-import kotlin.time.ExperimentalTime
+import kotlin.time.Duration.Companion.seconds
 
 //Imported from declined PR to main Kotlin Flow repository
 
@@ -62,11 +62,35 @@ fun <T, R> Flow<T>.windowed(size: Int, step: Int, partialWindows: Boolean, trans
     }
 }
 
-@ExperimentalTime
-fun tickerFlow(period: Duration, initialDelay: Duration = Duration.ZERO) = flow {
-    delay(initialDelay)
+/**
+ * Emits once at every multiple of [period] on a shared monotonic clock. Tickers whose periods
+ * divide each other therefore wake together (their UI updates land in the same frame), and
+ * ticks don't drift the way a plain delay loop does. Each grid point emits at most once. With
+ * [catchUp], a late wake-up emits the missed ticks (unless it fell more than [MaxTickCatchUp]
+ * behind), so counting ticks keeps time; without it, missed ticks are skipped.
+ */
+fun alignedTickerFlow(
+    period: Duration,
+    catchUp: Boolean = true,
+    clockMillis: () -> Long = ::monotonicMillis,
+) = flow {
+    val periodMillis = period.inWholeMilliseconds
+    require(periodMillis > 0) { "Period must be at least 1 ms, was $period" }
+    var next = (clockMillis() / periodMillis + 1) * periodMillis
     while (true) {
+        var now = clockMillis()
+        while (now < next) {
+            delay(next - now)
+            now = clockMillis()
+        }
         emit(Unit)
-        delay(period)
+        next += periodMillis
+        if (!catchUp && next <= now || now - next > MaxTickCatchUp.inWholeMilliseconds) {
+            next = (now / periodMillis + 1) * periodMillis
+        }
     }
 }
+
+private val MaxTickCatchUp = 5.seconds
+
+private fun monotonicMillis() = System.nanoTime() / 1_000_000

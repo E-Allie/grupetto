@@ -34,6 +34,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 
 class MainActivity : ComponentActivity() {
@@ -62,6 +63,12 @@ class MainActivity : ComponentActivity() {
         viewModel.requestRestart.observe(this) {
             restartGrupetto()
         }
+        viewModel.requestDiscoveryReportExport.observe(this) {
+            try { discoveryReportExport.launch("grupetto-bike-services.json") }
+            catch (_: ActivityNotFoundException) {
+                Toast.makeText(this, "No document picker installed. The report remains saved in Grupetto.", Toast.LENGTH_LONG).show()
+            }
+        }
         viewModel.requestQuit.observe(this) {
             quitGrupetto()
         }
@@ -78,6 +85,7 @@ class MainActivity : ComponentActivity() {
                 Toast.LENGTH_LONG
             ).show()
         }
+        viewModel.showCalibration.value = intent.getBooleanExtra("showCalibration", false)
         setContent {
             PTONOverlayTheme {
                 Surface(
@@ -100,6 +108,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.onAppResumed()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.getBooleanExtra("showCalibration", false)) viewModel.showCalibration.value = true
     }
 
     override fun onStop() {
@@ -137,9 +150,14 @@ class MainActivity : ComponentActivity() {
             // Explicitly stop long-running components before closing the task so Android won't revive it.
             stopService(Intent(this@MainActivity, OverlayService::class.java))
             HeartRateManager.stop()
-            (application as GrupettoApplication).powerMeterManager.stop()
-            (application as GrupettoApplication).bleServer.stop()
-            (application as GrupettoApplication).antPlusServer.stop()
+            (application as GrupettoApplication).bikeCalibration.stop()
+            // Radio teardown makes blocking IPC calls (ANT channel release, GATT close); keep it
+            // off the main thread so a slow radio service can't trigger an ANR while quitting.
+            withContext(Dispatchers.IO) {
+                (application as GrupettoApplication).powerMeterManager.stop()
+                (application as GrupettoApplication).bleServer.stop()
+                (application as GrupettoApplication).antPlusServer.stop()
+            }
             delay(750L)
             finishAffinity()
             finishAndRemoveTask()
@@ -154,6 +172,10 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+
+    private val discoveryReportExport = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
+    ) { uri -> uri?.let { viewModel.exportBikeDiscoveryReport(it) } }
 
     private val bluetoothPermissionRequest =
         registerForActivityResult(RequestMultiplePermissions()) { permissions ->

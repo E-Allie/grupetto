@@ -19,3 +19,13 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Grupetto: shrink and optimize only. Enum names are persisted in shared preferences
+# (for example OverlayLocation) and stack traces in logcat stay readable.
+-dontobfuscate
+-keepattributes SourceFile,LineNumberTable
+
+# The ANT+ library is driven partly by reflection (AntPlusHandler reads private fields and
+# constructors such as AntChannelProvider.mAntChannelProvider), so keep it intact.
+-keep class com.dsi.ant.** { *; }
+-dontwarn com.dsi.ant.**

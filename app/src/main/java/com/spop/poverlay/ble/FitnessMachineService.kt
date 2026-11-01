@@ -5,6 +5,9 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
+import com.spop.poverlay.sensor.heartrate.HeartRateManager
+import com.spop.poverlay.control.TrainerProtocol
+import com.spop.poverlay.control.ControlState
 import com.spop.poverlay.sensor.interfaces.DeviceType
 
 @Suppress("DEPRECATION")
@@ -21,6 +24,7 @@ class FitnessMachineService(
     fun onControlStateChanged(state: com.spop.poverlay.control.ControlState) {
         if (!canControl) return
         updateTargetFeatures()
+        publishTrainerState(state)
         if (lastPermissionLostCount != state.permissionLostCount) {
             notifyPermissionLost(state.permissionLostClient)
         }
@@ -86,7 +90,9 @@ class FitnessMachineService(
         } else {
             FitnessMachineConstants.FeatureFlags.CadenceSupported or
             FitnessMachineConstants.FeatureFlags.PowerMeasurementSupported or
-            FitnessMachineConstants.FeatureFlags.ResistanceLevelSupported
+            FitnessMachineConstants.FeatureFlags.ResistanceLevelSupported or
+            // Relayed from a paired strap when one is connected.
+            FitnessMachineConstants.FeatureFlags.HeartRateMeasurementSupported
         }
 
         val targetFlags = targetFlags()
@@ -183,6 +189,31 @@ class FitnessMachineService(
         super.onDisconnected(device)
     }
 
+    private val trainerStatusCharacteristic = BluetoothGattCharacteristic(
+        TrainerProtocol.STATUS_UUID, BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+        BluetoothGattCharacteristic.PERMISSION_READ
+    ).apply {
+        value = TrainerProtocol.encode(control?.state?.value ?: ControlState())
+        addDescriptor(BluetoothGattDescriptor(FitnessMachineConstants.ClientCharacteristicConfigurationUUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE))
+    }
+    private val trainerRecoveryCharacteristic = BluetoothGattCharacteristic(
+        TrainerProtocol.RECOVER_UUID, BluetoothGattCharacteristic.PROPERTY_WRITE, BluetoothGattCharacteristic.PERMISSION_WRITE)
+
+    private fun publishTrainerState(state: ControlState) {
+        val value = TrainerProtocol.encode(state)
+        if (trainerStatusCharacteristic.value?.contentEquals(value) == true) return
+        trainerStatusCharacteristic.value = value
+        server.notifyDirConCharacteristicChanged(trainerStatusCharacteristic)
+        connectedDevices.toList().forEach { server.notifyCharacteristicChanged(it, trainerStatusCharacteristic, false) }
+    }
+    fun recoverControl(client: String, value: ByteArray): Boolean {
+        val generation = TrainerProtocol.recoveryGeneration(value) ?: return false
+        val recovered = control?.recoverRemotely(client, generation) == true
+        control?.state?.value?.let(::publishTrainerState)
+        return recovered
+    }
+
     override val service = BluetoothGattService(
         FitnessMachineConstants.ServiceUUID,
         BluetoothGattService.SERVICE_TYPE_PRIMARY
@@ -194,6 +225,8 @@ class FitnessMachineService(
             addCharacteristic(indoorBikeDataCharacteristic)
         }
         addCharacteristic(featureCharacteristic)
+        addCharacteristic(trainerStatusCharacteristic)
+        if (canControl) addCharacteristic(trainerRecoveryCharacteristic)
         addCharacteristic(controlPointCharacteristic)
         if (!isTread) addCharacteristic(supportedResistanceRangeCharacteristic)
         addCharacteristic(trainingStatusCharacteristic)
@@ -213,6 +246,12 @@ class FitnessMachineService(
         offset: Int,
         value: ByteArray?
     ) {
+        if (characteristic.uuid == TrainerProtocol.RECOVER_UUID) {
+            val accepted = !preparedWrite && offset == 0 && value != null && recoverControl("ble:${device.address}", value)
+            if (responseNeeded) server.sendResponse(device, requestId,
+                if (accepted) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE, offset, null)
+            return
+        }
         if (characteristic.uuid == FitnessMachineConstants.ControlPointUUID) {
             if (preparedWrite || offset != 0 || value == null || value.isEmpty()) {
                 if (responseNeeded) server.sendResponse(device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null)
@@ -234,7 +273,7 @@ class FitnessMachineService(
             return
         }
         indoorBikeDataCharacteristic.setValue(
-            FitnessMachineData.encode(cadence, power, speed, resistance)
+            FitnessMachineData.encode(cadence, power, speed, resistance, HeartRateManager.heartRate.value)
         )
         server.notifyDirConCharacteristicChanged(indoorBikeDataCharacteristic)
 

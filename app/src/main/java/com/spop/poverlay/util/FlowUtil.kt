@@ -1,18 +1,8 @@
 package com.spop.poverlay.util
 
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.selects.SelectBuilder
-import kotlinx.coroutines.selects.select
 import kotlin.math.abs
-
-suspend fun <T> CoroutineScope.selectForever(selectBuilder: SelectBuilder<T>.()->Unit){
-    while (isActive){
-        select(selectBuilder)
-    }
-}
 
 /**
  * Smooth a sensor value using a Kalman filter

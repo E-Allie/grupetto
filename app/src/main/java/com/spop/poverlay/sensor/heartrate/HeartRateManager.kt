@@ -42,6 +42,11 @@ object HeartRateManager {
     private const val ReconnectDelayMs = 3_000L
     private const val AutoReconnectScanMs = 10_000L
     private const val StaleHeartRateTimeoutMs = 12_000L
+    // Android abandons a direct connectGatt after about 30 s; do not restart a
+    // pending attempt to the same strap sooner. Straps already serving other
+    // receivers can take several seconds to accept, and every restart cancels
+    // the attempt in progress.
+    private const val PendingConnectTimeoutMs = 30_000L
 
     // Default zones based on 180 bpm max HR (typical 40-year-old), 10% bands
     private const val DefaultZone12 = 108
@@ -58,6 +63,11 @@ object HeartRateManager {
 
     private val _connectedDevice = MutableStateFlow<HeartRateDevice?>(null)
     val connectedDevice: StateFlow<HeartRateDevice?> = _connectedDevice
+
+    private val _status = MutableStateFlow("No heart-rate monitor selected")
+    val status: StateFlow<String> = _status
+    private fun deviceName(address: String) = _savedDevices.value.firstOrNull { it.address == address }?.name
+        ?: prefs?.getString(PrefNamePrefix + address, null) ?: address
 
     private val _discoveredDevices = MutableStateFlow<List<HeartRateDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<HeartRateDevice>> = _discoveredDevices
@@ -84,6 +94,12 @@ object HeartRateManager {
 
     @Volatile
     private var bluetoothGatt: BluetoothGatt? = null
+    private var pendingAddress: String? = null
+    private var pendingSinceMs = 0L
+
+    private fun connectionPending(address: String) =
+        bluetoothGatt != null && pendingAddress == address &&
+            System.currentTimeMillis() - pendingSinceMs < PendingConnectTimeoutMs
 
     @Volatile
     private var discoveryCallback: ScanCallback? = null
@@ -123,10 +139,9 @@ object HeartRateManager {
             stopped.set(false)
             loadSavedDevices()
             selectedAddress = prefs?.getString(PrefSelectedDevice, null)
-            if (_savedDevices.value.isNotEmpty()) {
-                startAutoReconnectScan()
-            } else {
+            if (!manualDisconnectRequested) {
                 selectedAddress?.let { connectToAddress(it) }
+                if (_savedDevices.value.isNotEmpty()) startAutoReconnectScan()
             }
         } catch (ex: Exception) {
             Timber.w(ex, "HeartRateManager start failed")
@@ -155,6 +170,7 @@ object HeartRateManager {
     private fun releaseCurrentGatt() {
         val gatt = bluetoothGatt
         bluetoothGatt = null
+        pendingAddress = null
         clearConnectionState()
         if (gatt != null) {
             bluetoothAccess?.disconnect(gatt)
@@ -218,6 +234,7 @@ object HeartRateManager {
         val access = bluetoothAccess ?: return
         if (!access.canScan()) {
             stopDiscovery()
+            if (bluetoothGatt == null) _status.value = "Bluetooth and location permissions required"
             return
         }
         if (_isScanning.value) return
@@ -243,15 +260,19 @@ object HeartRateManager {
                 if (discoveryCallback !== this) return
                 discoveryCallback = null
                 _isScanning.value = false
+                if (bluetoothGatt == null) _status.value = "Heart-rate scan failed ($errorCode) · retrying"
                 Timber.w("HR scan failed: %s", errorCode)
             }
         }
 
         discoveryCallback = callback
         _isScanning.value = true
+        if (bluetoothGatt == null) _status.value = selectedAddress?.let { "Searching for ${deviceName(it)}" }
+            ?: "Searching for heart-rate monitors"
         if (!access.startScan(listOf(filter), settings, callback)) {
             discoveryCallback = null
             _isScanning.value = false
+            if (bluetoothGatt == null) _status.value = "Bluetooth scan unavailable · retrying"
         }
     }
 
@@ -292,6 +313,8 @@ object HeartRateManager {
         manualDisconnectRequested = false
         saveDevice(device)
         selectedAddress = device.address
+        // Further scan results would otherwise restart this connection attempt.
+        stopDiscovery()
         connectToAddress(device.address)
     }
 
@@ -302,6 +325,7 @@ object HeartRateManager {
         stopDiscovery()
         selectedAddress = null
         releaseCurrentGatt()
+        _status.value = "Heart-rate monitor disconnected"
     }
 
     fun forgetDevice(address: String) {
@@ -316,6 +340,7 @@ object HeartRateManager {
         if (selectedAddress == address) {
             selectedAddress = null
             releaseCurrentGatt()
+            _status.value = "No heart-rate monitor selected"
         }
         loadSavedDevices()
         pruneDiscovered()
@@ -356,6 +381,11 @@ object HeartRateManager {
         if (manualDisconnectRequested) return false
         if (_connectedDevice.value != null) return false
         val address = device.address
+        // A repeated advertisement must not cancel the connection already in progress.
+        if (connectionPending(address)) {
+            stopDiscovery()
+            return true
+        }
 
         // Exact MAC match
         if (_savedDevices.value.any { it.address == address }) {
@@ -407,8 +437,14 @@ object HeartRateManager {
 
     private fun connectToAddress(address: String) {
         val access = bluetoothAccess ?: return
+        if (connectionPending(address) || _connectedDevice.value?.address == address) return
         releaseCurrentGatt()
-        val device = access.remoteDevice(address) ?: return
+        if (!access.canConnect()) { _status.value = "Bluetooth permission required"; return }
+        val device = access.remoteDevice(address)
+        if (device == null) { _status.value = "${deviceName(address)} unavailable · retrying"; return }
+        pendingAddress = address
+        pendingSinceMs = System.currentTimeMillis()
+        _status.value = "Connecting to ${deviceName(address)}"
         bluetoothGatt = access.connect(device, object : BluetoothGattCallback() {
             private var lowPowerRequested = false
 
@@ -418,6 +454,7 @@ object HeartRateManager {
                     return
                 }
                 releaseCurrentGatt()
+                _status.value = "Reconnecting to ${deviceName(address)}"
                 scheduleReconnect()
             }
 
@@ -440,6 +477,7 @@ object HeartRateManager {
                         lastConnectedAtMs = System.currentTimeMillis()
                         val name = info.name ?: prefs?.getString(PrefNamePrefix + info.address, null)
                         _connectedDevice.value = info.copy(name = name)
+                        _status.value = "Connected · waiting for heart rate"
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         connectionFailed(gatt)
@@ -449,10 +487,10 @@ object HeartRateManager {
 
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 if (bluetoothGatt !== gatt) return
-                if (status != BluetoothGatt.GATT_SUCCESS) return
-                val service = gatt.getService(HR_SERVICE) ?: return
-                val characteristic = service.getCharacteristic(HR_MEASUREMENT) ?: return
-                val desc = characteristic.getDescriptor(CCC_UUID) ?: return
+                if (status != BluetoothGatt.GATT_SUCCESS) { connectionFailed(gatt); return }
+                val desc = gatt.getService(HR_SERVICE)?.getCharacteristic(HR_MEASUREMENT)?.getDescriptor(CCC_UUID)
+                val characteristic = gatt.getService(HR_SERVICE)?.getCharacteristic(HR_MEASUREMENT)
+                if (desc == null || characteristic == null) { connectionFailed(gatt); return }
                 if (!access.enableNotifications(gatt, characteristic, desc)) connectionFailed(gatt)
             }
 
@@ -491,9 +529,11 @@ object HeartRateManager {
                 if (bpm != null && bpm > 0) {
                     _heartRate.value = bpm
                     lastHeartRateAtMs = System.currentTimeMillis()
+                    _status.value = "Heart rate active"
                 }
             }
         })
+        if (bluetoothGatt == null) _status.value = "Connection to ${deviceName(address)} failed · retrying"
     }
 
     private fun scheduleReconnect() {
@@ -515,6 +555,11 @@ object HeartRateManager {
         autoReconnectJob?.cancel()
         autoReconnectJob = scope.launch {
             while (!stopped.get() && _connectedDevice.value == null && !manualDisconnectRequested) {
+                if (pendingAddress?.let { connectionPending(it) } == true) {
+                    delay(1000)
+                    continue
+                }
+                if (bluetoothGatt != null) releaseCurrentGatt()
                 if (!_isScanning.value) {
                     startDiscovery(ScanSettings.SCAN_MODE_LOW_POWER)
                 }

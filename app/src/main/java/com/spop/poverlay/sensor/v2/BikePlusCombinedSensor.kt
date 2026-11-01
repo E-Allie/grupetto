@@ -75,7 +75,7 @@ class BikePlusCombinedSensor(
     private val binder: IBinder,
     private val onSample: (BikeSample?) -> Unit = {},
     private val clock: () -> Long = SystemClock::elapsedRealtime
-) : TitanControl {
+) : TitanControl, com.spop.poverlay.sensor.interfaces.SensorInterface {
     private val lifecycleLock = Any()
     private val publicationLock = Any()
     @Volatile private var poller: Thread? = null
@@ -93,11 +93,11 @@ class BikePlusCombinedSensor(
     }
 
     private val mutablePower = sensorFlow<Float>()
-    val power = mutablePower.asSharedFlow()
+    override val power = mutablePower.asSharedFlow()
     private val mutableCadence = sensorFlow<Float>()
-    val cadence = mutableCadence.asSharedFlow()
+    override val cadence = mutableCadence.asSharedFlow()
     private val mutableResistance = sensorFlow<Float>()
-    val resistance = mutableResistance.asSharedFlow()
+    override val resistance = mutableResistance.asSharedFlow()
     private val mutableStatus = sensorFlow<TitanStatusPacket>()
     override val status = mutableStatus.asSharedFlow()
 
@@ -137,7 +137,8 @@ class BikePlusCombinedSensor(
                             mutablePower.tryEmit(bike.power / 100f)
                             mutableCadence.tryEmit(bike.rpm.toFloat())
                             mutableResistance.tryEmit(bike.targetResistance.toFloat())
-                            onSample(BikeSample(bike.power / 100f, bike.rpm.toFloat(), bike.targetResistance, timestamp))
+                            onSample(BikeSample(bike.power / 100f, bike.rpm.toFloat(), bike.targetResistance,
+                                timestamp, packet?.currentResistance ?: bike.currentResistance))
                         }
                     }
                     errors.reset()

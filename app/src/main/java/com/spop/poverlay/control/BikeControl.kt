@@ -18,7 +18,9 @@ fun supportsBikeControl(isPeloton: Boolean, platform: String?, model: String = "
     return machine == "titan" || com.spop.poverlay.util.isG700CrossTrainerModel(model)
 }
 
-data class BikeSample(val power: Float, val cadence: Float, val resistance: Int, val timestamp: Long)
+/** resistance is the firmware's target echo; physical position is deliberately separate. */
+data class BikeSample(val power: Float, val cadence: Float, val resistance: Int, val timestamp: Long,
+    val physicalResistance: Int? = null)
 enum class ControlMode { Manual, Erg, Simulation, Resistance }
 data class ControlState(
     val connected: Boolean = false,
@@ -40,6 +42,9 @@ data class ControlState(
     val simulationSettings: SimulationSettings = SimulationSettings(),
     val gear: Int = GearRatios.DEFAULT,
     val simulationDecision: SimulationDecision? = null,
+    val fault: ControlFault? = null,
+    val faultGeneration: Int = 0,
+    val softwareAlgorithm: com.spop.poverlay.erg.SoftwareErgAlgorithm = com.spop.poverlay.erg.SoftwareErgAlgorithm.FirmwareTable,
     val suspended: Boolean = false,
     val paused: Boolean = false,
     val externalPowerActive: Boolean = false,
@@ -78,6 +83,9 @@ class BikeControl(
     private var minimumConfirmed = false
     private var expectedResistance: Int? = null
     private var resistanceCommandAt = 0L
+    private val resistanceAcknowledgement = ResistanceAcknowledgement()
+    private var fault: ControlFault? = null
+    private var faultGeneration = 0
     private var lastCadenceTimestamp: Long? = null
 
     /** Stable advertised range when changing between native and software regulation. */
@@ -87,7 +95,7 @@ class BikeControl(
     @Synchronized fun setErgMode(mode: ErgMode) {
         if (mode == state.value.ergMode) return
         mutableState.value = state.value.copy(ergMode = mode)
-        if (engaged && isPowerMode()) suspendControl("ERG backend changed · tap Resume")
+        if (engaged && isPowerMode()) suspendControl("ERG backend changed · tap Resume", ControlFault.ConfigurationChanged)
         publish()
     }
     @Synchronized fun setSimulationSettings(settings: SimulationSettings) {
@@ -101,7 +109,7 @@ class BikeControl(
         val next = reading?.takeIf { freshExternalPower(it, clock()) != null }
         val changed = externalPower?.address != next?.address
         externalPower = next
-        if (changed && engaged && isPowerMode()) suspendControl("Power source changed · tap Resume")
+        if (changed && engaged && isPowerMode()) suspendControl("Power source changed · tap Resume", ControlFault.ConfigurationChanged)
         feedPowerSample()
         publish()
     }
@@ -135,9 +143,11 @@ class BikeControl(
                 if (value.resistance == 0) minimumConfirmed = true
                 else if (minimumConfirmed || clock() - released >= 1500)
                     suspendControl("Resistance changed while SIM released")
-            } else if (state.value.mode == ControlMode.Resistance && expectedResistance != null &&
-                value.resistance != expectedResistance && clock() - resistanceCommandAt > 1500) {
-                suspendControl("Resistance changed manually or command not acknowledged")
+            } else if (state.value.mode == ControlMode.Resistance && expectedResistance != null) {
+                resistanceAcknowledgement.sample(value.resistance, value.timestamp, clock())?.let { failure ->
+                    suspendControl(if (failure == ControlFault.ResistanceTimeout)
+                        "Resistance adjustment did not settle · resume to retry" else "Resistance changed by rider · resume in Grupetto", failure)
+                }
             }
         }
         feedPowerSample()
@@ -153,10 +163,11 @@ class BikeControl(
         power.sample(external?.watts?.coerceAtLeast(0)?.toFloat() ?: reading.power,
             reading.cadence, reading.resistance,
             external?.let { minOf(reading.timestamp, it.timestamp) } ?: reading.timestamp,
-            staleAfterMs = if (external == null) 1500 else 3000)
+            staleAfterMs = if (external == null) 1500 else 3000, nativePower = reading.power,
+            bikeTimestamp = reading.timestamp, external = external != null)
     }
     private fun unavailable(reason: String) {
-        if (engaged) suspendControl(reason) else stop(reason)
+        if (engaged) suspendControl(reason, ControlFault.TelemetryLost) else stop(reason)
         mutableState.value = state.value.copy(connected = false)
     }
 
@@ -178,7 +189,7 @@ class BikeControl(
         engaged = false
         paused = false
         mutableState.value = state.value.copy(mode = ControlMode.Manual, externalControl = null,
-            targetResistance = sample?.resistance ?: state.value.targetResistance, message = reason)
+            targetResistance = sample?.resistance ?: state.value.targetResistance, message = suspension ?: reason)
         publish()
         return true
     }
@@ -199,9 +210,13 @@ class BikeControl(
         releaseAt = null
         minimumConfirmed = false
     }
-    private fun suspendControl(reason: String) {
+    private fun suspendControl(reason: String, kind: ControlFault = ControlFault.Safety) {
         if (suspending || closed) return
         val wasSuspended = suspension != null
+        // A later safety/rider stop must never be downgraded to a recoverable fault.
+        if (fault != null && fault?.remoteRecoverable == false && kind.remoteRecoverable) return
+        if (fault != kind || suspension != reason) faultGeneration++
+        fault = kind
         suspension = reason
         paused = true
         suspending = true
@@ -213,16 +228,40 @@ class BikeControl(
         mutableState.value = state.value.copy(message = reason, externalControl = null)
         publish()
     }
-    @Synchronized fun pauseLocally() { if (engaged) suspendControl("Stopped by rider") }
+    @Synchronized fun pauseLocally() {
+        // Stop also wins in the gap between recovery acknowledgement and the next target.
+        if (supported && !closed) suspendControl("Stopped by rider", ControlFault.RiderStop)
+    }
     /** Remote Start/Reset never call this local-only latch release. */
     @Synchronized fun resumeLocally(): Boolean {
         if (!fresh()) return false
         if (!power.disable()) return false
+        if (fault != null) faultGeneration++
         suspension = null
+        fault = null
+        resistanceAcknowledgement.clear()
         paused = false
         val accepted = resumeMode()
         publish()
         return accepted && suspension == null
+    }
+    /** A recovery gesture clears only this exact recoverable fault. It never replays a target. */
+    @Synchronized fun recoverRemotely(client: String, generation: Int): Boolean {
+        if (owner != client || fault?.remoteRecoverable != true || generation != faultGeneration || !fresh()) return false
+        if (!power.disable()) return false
+        faultGeneration++
+        suspension = null; fault = null; paused = false; engaged = false
+        expectedResistance = null; resistanceAcknowledgement.clear(); clearSimulation()
+        mutableState.value = state.value.copy(mode = ControlMode.Manual, message = "Control ready · waiting for target")
+        publish()
+        return true
+    }
+    @Synchronized fun setSoftwareAlgorithm(algorithm: SoftwareErgAlgorithm) {
+        if (state.value.softwareAlgorithm == algorithm) return
+        if (engaged && isPowerMode()) suspendControl("Software ERG algorithm changed · tap Resume", ControlFault.ConfigurationChanged)
+        power.setSoftwareAlgorithm(algorithm)
+        mutableState.value = state.value.copy(softwareAlgorithm = algorithm)
+        publish()
     }
     private fun resumeMode(): Boolean = when (state.value.mode) {
         ControlMode.Erg -> startPower(state.value.targetWatts)
@@ -312,9 +351,10 @@ class BikeControl(
         // A real new target deliberately takes over from any previously running native loop.
         if (!power.disable(forceNative = true) || suspension != null) return false
         val accepted = runCatching { writeResistance(level.coerceIn(0, 100)) }.getOrDefault(false)
-        if (!accepted) { suspendControl("Resistance command failed"); return false }
+        if (!accepted) { suspendControl("Resistance command failed", ControlFault.CommandFailed); return false }
         expectedResistance = level
         resistanceCommandAt = clock()
+        resistanceAcknowledgement.command(level, resistanceCommandAt, sample?.resistance)
         return true
     }
 
@@ -433,6 +473,7 @@ class BikeControl(
         val backend = power.state.value
         mutableState.value = state.value.copy(ergPath = backend.path, nativeAvailable = backend.nativeAvailable,
             capability = backend.capability, simulationDecision = decision, suspended = suspension != null,
+            fault = fault, faultGeneration = faultGeneration,
             paused = paused, owner = owner, controlEngaged = engaged, externalPowerActive = externalActive())
     }
 }

@@ -61,7 +61,8 @@ internal fun TrainerControls(
     onShift: (Int) -> Unit = {},
     onResume: () -> Unit = {},
     onStop: () -> Unit = {},
-    onSimulationSettings: () -> Unit = {}
+    onSimulationSettings: () -> Unit = {},
+    onSoftwareAlgorithm: (com.spop.poverlay.erg.SoftwareErgAlgorithm) -> Unit = {}
 ) {
     val mode = if (state.mode == ControlMode.Resistance) ControlMode.Manual else state.mode
     Column(Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp * .60f).dp)
@@ -89,11 +90,19 @@ internal fun TrainerControls(
                 }
             }
         }
+        Text("Software algorithm", fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            com.spop.poverlay.erg.SoftwareErgAlgorithm.entries.forEach { algorithm ->
+                OutlinedButton({ onSoftwareAlgorithm(algorithm) }, Modifier.weight(1f).semantics {
+                    selected = state.softwareAlgorithm == algorithm
+                }) { Text(algorithm.label) }
+            }
+        }
         Text(ergPathLabel(state.ergPath), color = Color(0xFFB7F7DF), fontSize = 13.sp)
         Text(state.capability ?: when (state.ergMode) {
             ErgMode.Auto -> "Uses Peloton Auto Follow when available, otherwise software ERG."
             ErgMode.Native -> "Uses the bike's Power Zone Auto Follow."
-            ErgMode.Host -> "Uses Grupetto's power-table prediction and software feedback."
+            ErgMode.Host -> "Uses the selected software algorithm."
         }, fontSize = 12.sp, lineHeight = 16.sp, color = Color(0xFF9EAEC0))
         Spacer(Modifier.height(10.dp))
         if ((mode == ControlMode.Erg || mode == ControlMode.Simulation) &&
