@@ -13,10 +13,12 @@ import org.junit.Assert.*
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import java.io.File
 
 class TrainerControlsTest {
-    @get:Rule val compose = createComposeRule()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(compose).around(UiTestDiagnostics(compose))
     private val writes = mutableListOf<Int>()
     private val control = BikeControl(true, { 1000L }) { writes.add(it); true }
     @After fun closeController() { control.close() }
@@ -29,7 +31,8 @@ class TrainerControlsTest {
             SettingsDialog("Bike+ / CrossTrainer", {}) {
                 TrainerControls(state, { control.localErg(it) }, { control.localSimulation(it) },
                     { control.localManual() }, { control.localResistance(it) }, control::tune,
-                    control::setErgMode, control::shift, { control.resumeLocally() }, control::pauseLocally)
+                    control::setErgMode, control::shift, { control.resumeLocally() }, control::pauseLocally,
+                    onSoftwareAlgorithm = control::setSoftwareAlgorithm)
             }
         } }
     }
@@ -46,6 +49,20 @@ class TrainerControlsTest {
         val bitmap = compose.onNode(isDialog()).captureToImage().asAndroidBitmap()
         val directory = InstrumentationRegistry.getInstrumentation().targetContext.filesDir
         File(directory, name).outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+    @Test fun upstreamRampIsConfigurableBeforeStarting() {
+        setup()
+        val slider = "Upstream model ramp speed"
+        compose.onNodeWithContentDescription(slider).assertDoesNotExist()
+        compose.onNodeWithText("Upstream learned model").performScrollTo().performClick()
+        setSlider(slider, 17f)
+        compose.runOnIdle {
+            assertEquals(17, control.state.value.rampRate)
+            assertFalse(control.state.value.controlEngaged)
+            assertTrue(writes.isEmpty())
+        }
+        compose.onNodeWithText("Firmware table").performScrollTo().performClick()
+        compose.onNodeWithContentDescription(slider).assertDoesNotExist()
     }
     @Test fun modesShowMatchingControlsAndShiftsUpdateTheirLiveTargets() {
         setup()

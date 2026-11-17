@@ -60,7 +60,7 @@ class BleTransportContinuityTest {
         ble = BleServer(context, manager, sensor, FakeTimeProvider())
         mockkObject(ble, recordPrivateCalls = true)
         tcp = mockk(relaxed = true)
-        set("dirConServer", tcp)
+        set("dirConDelegate", lazyOf(tcp))
         set("isDirConOnlyStarted", true)
         fitnessService = logicalService(FitnessMachineConstants.ServiceUUID)
         newGattService = mockk(relaxed = true)
@@ -124,7 +124,7 @@ class BleTransportContinuityTest {
         assertSame(gatt, get("gattServer"))
         assertEquals(true, get("isServerStarted"))
         assertEquals(false, get("isDirConOnlyStarted"))
-        assertSame(tcp, get("dirConServer"))
+        assertSame(tcp, dirConOwner())
         assertEquals(listOf(fitnessService), services())
         verify(exactly = 1) { gatt.addService(newGattService.service) }
         // Retiring and registering GATT never exposes an empty service list to DIRCON.
@@ -304,7 +304,7 @@ class BleTransportContinuityTest {
         ble.stopBluetoothTransport()
 
         assertNull(get("gattServer"))
-        assertNull(get("dirConServer"))
+        assertSame(tcp, dirConOwner())
         assertEquals(false, get("isServerStarted"))
         assertEquals(false, get("isDirConOnlyStarted"))
         assertTrue(services().isEmpty())
@@ -321,7 +321,7 @@ class BleTransportContinuityTest {
 
         ble.stop()
 
-        assertNull(get("dirConServer"))
+        assertSame(tcp, dirConOwner())
         assertEquals(false, get("isDirConOnlyStarted"))
         assertTrue(services().isEmpty())
         assertTrue(telemetry.isCancelled)
@@ -338,12 +338,14 @@ class BleTransportContinuityTest {
         invoke("updateHeartRateServiceRegistration", false)
         assertFalse(bridge.services().any { it.uuid == HeartRateConstants.ServiceUUID })
 
-        assertSame(tcp, get("dirConServer"))
+        assertSame(tcp, dirConOwner())
         verify(exactly = 0) { tcp.stop() }
     }
 
+    private fun dirConOwner() = (get("dirConDelegate") as Lazy<*>).value
+
     private fun assertDirConOnlyContinues() {
-        assertSame(tcp, get("dirConServer"))
+        assertSame(tcp, dirConOwner())
         assertEquals(true, get("isDirConOnlyStarted"))
         assertEquals(false, get("isServerStarted"))
         assertEquals(listOf(fitnessService), services())

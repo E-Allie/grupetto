@@ -8,7 +8,8 @@ class SoftwareAlgorithmSelectionTest {
     @Test fun upstreamIsSelectableAndSwitchingNeverLeavesTwoControllersWriting() {
         val r = ControlRig()
         try {
-            r.resistance = 44; r.sample(168f, 90f)
+            r.resistance = 44
+            repeat(30) { r.sample(168f, 90f) }
             r.control.setErgMode(ErgMode.Host)
             assertEquals(SoftwareErgAlgorithm.FirmwareTable, r.control.state.value.softwareAlgorithm)
             r.control.setSoftwareAlgorithm(SoftwareErgAlgorithm.UpstreamModel)

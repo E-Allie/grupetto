@@ -32,6 +32,7 @@ data class ControlState(
     val externalControl: String? = null,
     val shiftSize: Int = 2,
     val gain: Float = .007f,
+    val rampRate: Int = UpstreamSoftwareErgController.RAMP_RATE_DEFAULT,
     val permissionLostCount: Int = 0,
     val permissionLostClient: String? = null,
     val message: String = "Waiting for Bike+",
@@ -67,6 +68,10 @@ class BikeControl(
     private val ownsScope = scope == null
     private val backendScope = scope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val power = ErgCoordinator(nativeControl, writeResistance, clock, this, backendScope, ::suspendControl)
+    internal val powerModel get() = power.upstreamModel
+    internal var trace: ((String) -> Unit)?
+        get() = power.trace
+        set(value) { power.trace = value }
     private var sample: BikeSample? = null
     private var externalPower: ExternalPowerReading? = null
     private var owner: String? = null
@@ -113,10 +118,11 @@ class BikeControl(
         feedPowerSample()
         publish()
     }
-    @Synchronized fun tune(shiftSize: Int, gain: Float, wattsPerShift: Int = state.value.wattsPerShift) {
+    @Synchronized fun tune(shiftSize: Int, gain: Float, wattsPerShift: Int = state.value.wattsPerShift,
+                           rampRate: Int = state.value.rampRate) {
         val bounded = if (gain.isFinite()) gain.coerceIn(.001f, .03f) else .007f
         mutableState.value = state.value.copy(shiftSize = shiftSize.coerceIn(1, 10),
-            wattsPerShift = wattsPerShift.coerceIn(1, 50), gain = bounded)
+            wattsPerShift = wattsPerShift.coerceIn(1, 50), gain = bounded, rampRate = power.setRampRate(rampRate))
         power.setGain(bounded)
     }
 
@@ -162,7 +168,7 @@ class BikeControl(
         // Bike polls must not turn one external-meter packet into fresh power samples.
         power.sample(external?.watts?.coerceAtLeast(0)?.toFloat() ?: reading.power,
             reading.cadence, reading.resistance,
-            external?.let { minOf(reading.timestamp, it.timestamp) } ?: reading.timestamp,
+            external?.timestamp ?: reading.timestamp,
             staleAfterMs = if (external == null) 1500 else 3000, nativePower = reading.power,
             bikeTimestamp = reading.timestamp, external = external != null)
     }
@@ -173,6 +179,7 @@ class BikeControl(
 
     /** Stop/Reset discard targets, but never erase an existing rider override latch. */
     @Synchronized fun stop(reason: String = "Manual control", releaseControl: Boolean = true): Boolean {
+        if (engaged) trace?.invoke("stop reason=\"$reason\" mode=${state.value.mode}")
         val released = power.disable()
         if (releaseControl && owner != null) {
             mutableState.value = state.value.copy(permissionLostCount = state.value.permissionLostCount + 1,
@@ -275,6 +282,7 @@ class BikeControl(
     }
     private fun selectMode(mode: ControlMode, engage: Boolean = true): Boolean {
         if (state.value.mode != mode || paused) {
+            trace?.invoke("mode ${state.value.mode}->$mode level=${sample?.resistance}")
             if ((engaged || engage) && !power.disable()) return false
             clearSimulation()
             expectedResistance = null
@@ -405,6 +413,29 @@ class BikeControl(
 
     data class Reply(val result: Int, val status: ByteArray? = null)
     @Synchronized fun procedure(client: String, bytes: ByteArray): Reply {
+        val reply = runProcedure(client, bytes)
+        trace?.invoke("cmd client=$client bytes=${bytes.joinToString(" ") { "%02X".format(it) }} " +
+            describeCommand(bytes) + " result=${reply.result} mode=${state.value.mode}")
+        return reply
+    }
+
+    private fun describeCommand(bytes: ByteArray): String {
+        fun signed(index: Int) = if (bytes.size < index + 2) null
+            else ((bytes[index].toInt() and 255) or (bytes[index + 1].toInt() shl 8)).toShort().toInt()
+        return when (bytes.firstOrNull()?.toInt()?.and(255)) {
+            0 -> "op=request-control"
+            1 -> "op=reset"
+            4 -> "op=set-resistance level=${signed(1)?.let { it / 10f }}"
+            5 -> "op=set-power watts=${signed(1)}"
+            7 -> "op=start-resume"
+            8 -> "op=stop-pause param=${bytes.getOrNull(1)}"
+            0x11 -> "op=sim grade=${signed(3)?.let { it / 100f }} wind=${signed(1)?.let { it / 1000f }}"
+            null -> "op=empty"
+            else -> "op=${"%02X".format(bytes[0])}"
+        }
+    }
+
+    private fun runProcedure(client: String, bytes: ByteArray): Reply {
         val op = bytes.firstOrNull()?.toInt()?.and(255) ?: return Reply(3)
         val size = when (op) { 0, 1, 7 -> 1; 8 -> 2; 4, 5 -> 3; 0x11 -> 7; else -> return Reply(2) }
         if (bytes.size != size) return Reply(3)

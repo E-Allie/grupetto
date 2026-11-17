@@ -15,7 +15,7 @@ class UpstreamSoftwareErgControllerTest {
         controller.tick()
     }
     @Test fun modeledRampAndSettleMatchUpstream() {
-        sample(); assertTrue(controller.enable(220))
+        repeat(80) { sample() }; assertTrue(controller.enable(220))
         repeat(5) { sample() }
         assertEquals(49, resistance)
         repeat(20) { sample() }
@@ -24,7 +24,7 @@ class UpstreamSoftwareErgControllerTest {
         assertNull(failure)
     }
     @Test fun rampContinuesBetweenFreshBikeSamplesAndStopsForKnob() {
-        sample(); controller.enable(345); sample()
+        repeat(80) { sample() }; controller.enable(345); sample()
         val before = writes.size
         now += 100; controller.tick()
         assertTrue(writes.size > before)
@@ -33,6 +33,20 @@ class UpstreamSoftwareErgControllerTest {
         assertFalse(controller.isActive)
         assertNotNull(failure)
     }
+    @Test fun throwingActuatorDisarmsModeledRampWithoutRetrying() {
+        var attempts = 0
+        val c = UpstreamSoftwareErgController({
+            attempts++
+            throw IllegalStateException("Controller disconnected")
+        }, { now }, Any()) { failure = it }
+        repeat(30) { now += 200; c.sample(168f, 90f, 44, now, 1500) }
+        assertTrue(c.enable(320))
+        repeat(8) { now += 200; c.sample(168f, 90f, 44, now, 1500); c.tick() }
+        assertEquals(1, attempts)
+        assertFalse(c.isActive)
+        assertEquals("Resistance command failed", failure)
+    }
+
     @Test fun externalPowerDisablesPredictedJump() {
         sample(external = true); controller.enable(220)
         sample(external = true)

@@ -56,7 +56,7 @@ internal fun TrainerControls(
     onSimulation: (Float) -> Unit,
     onManual: () -> Unit,
     onResistance: (Int) -> Unit,
-    onTuning: (Int, Float, Int) -> Unit,
+    onTuning: (Int, Float, Int, Int) -> Unit,
     onErgMode: (ErgMode) -> Unit = {},
     onShift: (Int) -> Unit = {},
     onResume: () -> Unit = {},
@@ -98,6 +98,12 @@ internal fun TrainerControls(
                 }) { Text(algorithm.label) }
             }
         }
+        if (state.softwareAlgorithm == com.spop.poverlay.erg.SoftwareErgAlgorithm.UpstreamModel) {
+            TrainerSlider("Upstream model ramp speed", "${state.rampRate} levels/s",
+                state.rampRate.toFloat(), 3f..20f, 16) {
+                onTuning(state.shiftSize, state.gain, state.wattsPerShift, it.roundToInt())
+            }
+        }
         Text(ergPathLabel(state.ergPath), color = Color(0xFFB7F7DF), fontSize = 13.sp)
         Text(state.capability ?: when (state.ergMode) {
             ErgMode.Auto -> "Uses Peloton Auto Follow when available, otherwise software ERG."
@@ -108,14 +114,14 @@ internal fun TrainerControls(
         if ((mode == ControlMode.Erg || mode == ControlMode.Simulation) &&
             (state.ergPath == ErgPath.Host || state.ergMode == ErgMode.Host)) {
             TrainerSlider("Software gain", String.format(Locale.US, "%.3f", state.gain), state.gain, .001f..0.030f, 28) {
-                onTuning(state.shiftSize, it, state.wattsPerShift)
+                onTuning(state.shiftSize, it, state.wattsPerShift, state.rampRate)
             }
         }
         when (mode) {
             ControlMode.Erg -> {
                 TrainerSlider("ERG target", "${state.targetWatts} W", state.targetWatts.toFloat(), 25f..800f) { onErg(it.roundToInt()) }
                 TrainerSlider("Watts per shift", "${state.wattsPerShift} W", state.wattsPerShift.toFloat(), 1f..50f, 48) {
-                    onTuning(state.shiftSize, state.gain, it.roundToInt())
+                    onTuning(state.shiftSize, state.gain, it.roundToInt(), state.rampRate)
                 }
             }
             ControlMode.Simulation -> {
@@ -134,7 +140,7 @@ internal fun TrainerControls(
                     onResistance(it.roundToInt())
                 }
                 TrainerSlider("Resistance per shift", "${state.shiftSize} points", state.shiftSize.toFloat(), 1f..10f, 8) {
-                    onTuning(it.roundToInt(), state.gain, state.wattsPerShift)
+                    onTuning(it.roundToInt(), state.gain, state.wattsPerShift, state.rampRate)
                 }
             }
         }

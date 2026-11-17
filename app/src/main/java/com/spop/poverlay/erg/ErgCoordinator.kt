@@ -37,6 +37,11 @@ class ErgCoordinator(
     val state: StateFlow<ErgState> = mutableState.asStateFlow()
     private val host = HostErgController(writeResistance, clock, commandLock, ::standDown)
     private val upstream = UpstreamSoftwareErgController(writeResistance, clock, commandLock, ::standDown)
+    internal val upstreamModel get() = upstream.powerModel
+    internal var trace: ((String) -> Unit)?
+        get() = upstream.trace
+        set(value) { upstream.trace = value }
+    fun setRampRate(rate: Int) = upstream.setRampRate(rate)
     private var algorithm = SoftwareErgAlgorithm.FirmwareTable
     fun setSoftwareAlgorithm(value: SoftwareErgAlgorithm) = synchronized(commandLock) {
         host.disable(); upstream.disable(); algorithm = value

@@ -35,7 +35,7 @@ class TrainerRecoveryUiTest {
             compose.setContent { MaterialTheme {
                 val state = c.state.collectAsState().value
                 SettingsDialog("Trainer", {}) {
-                    TrainerControls(state, {}, {}, {}, {}, { _,_,_ -> },
+                    TrainerControls(state, {}, {}, {}, {}, { _,_,_,_ -> },
                         onSoftwareAlgorithm = c::setSoftwareAlgorithm)
                 }
             } }

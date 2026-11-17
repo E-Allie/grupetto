@@ -59,13 +59,15 @@ does not substitute a 400 W prediction for a higher target. Software feedback
 pauses below 25 rpm.
 
 The saved **Software algorithm** choice is independent of Native/Auto/Software:
-**Firmware table** remains the default. **Upstream learned model** ports the
-upstream `5061774` ERG algorithm behind the same coordinator and actuator lock.
-It learns steady native-bike watts in memory, ramps modeled jumps at 10 levels/s,
-holds power correction for 4.5 seconds after arrival, and uses a half-level power
-deadband (at least 3 W). Ordinary feedback adjustments retain the upstream
-3-level/s bound; direct resistance commands and our SIM scheduler do not inherit
-that bound. External-meter control disables the upstream model's predicted jumps.
+**Firmware table** remains the default. **Upstream learned model** uses the
+v0.0.58 controller behind the same coordinator and actuator lock. Select it
+to set **Upstream model ramp speed** before a ride (3–20 resistance levels/s,
+default 10). This setting applies when the learned model regulates power.
+
+The model learns from steady native-bike watts, waits for spin-up before a
+modeled rise, and uses recent cadence at the lower target to size a recovery
+drop. It holds feedback for 4.5 seconds after arrival. Ordinary feedback uses
+a half-level power deadband (at least 3 W) and a 3-level/s rate limit. External-meter control disables the upstream model's predicted jumps.
 Changing the algorithm during regulation stops control until local Resume.
 
 ## Terrain simulation

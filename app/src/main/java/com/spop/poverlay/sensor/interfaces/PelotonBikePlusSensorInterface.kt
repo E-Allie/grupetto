@@ -55,13 +55,16 @@ class PelotonBikePlusSensorInterface(val context: Context, controlSupported: Boo
         writeResistance = { currentSensor?.setResistance(it) == true },
         nativeControl = titanControl,
         scope = this
-    )
+    ).apply {
+        if (com.spop.poverlay.BuildConfig.DEBUG) trace = { Timber.tag("ErgTrace").d(it) }
+    }
 
     init {
         if (controlSupported) {
             val preferences = context.getSharedPreferences(com.spop.poverlay.ConfigurationRepository.SharedPrefsName, Context.MODE_PRIVATE)
             bikeControl.tune(preferences.getInt("bikeShiftSize", 2), preferences.getFloat("bikeProportionalGain", .007f),
-                preferences.getInt("bikeWattsPerShift", 10))
+                preferences.getInt("bikeWattsPerShift", 10), preferences.getInt("bikeRampRate",
+                    com.spop.poverlay.erg.UpstreamSoftwareErgController.RAMP_RATE_DEFAULT))
             bikeControl.setSoftwareAlgorithm(com.spop.poverlay.erg.SoftwareErgAlgorithm.read(preferences.getString("softwareErgAlgorithm", null)))
             bikeControl.setErgMode(com.spop.poverlay.erg.ErgMode.fromPreference(preferences.getString("ergMode", null)))
             bikeControl.setSimulationSettings(com.spop.poverlay.sim.SimulationPreferences.read(preferences))
